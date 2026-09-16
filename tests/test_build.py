@@ -201,6 +201,52 @@ def verify_kernel_entry_stub(repo: Path) -> None:
         raise RuntimeError("kernel entry stub jumps outside the kernel image")
 
 
+def verify_phase_b_platform(repo: Path) -> None:
+    marker = b"MINI_OS_PHASE_B_DETERMINISTIC_PLATFORM_ONLY"
+    run(["make", "test-network-host"], repo)
+    test_binary = repo / "build/network-phase-b/platform_test"
+    if marker not in test_binary.read_bytes():
+        raise RuntimeError("deterministic platform binary has no test-only marker")
+    if marker in (repo / "build/mini_os.img").read_bytes():
+        raise RuntimeError("deterministic platform marker entered production image")
+
+    symbols = run(["nm", "-u", str(test_binary)], repo).stdout
+    if "getchar" in symbols or "kbd_poll_key" in symbols:
+        raise RuntimeError("deterministic wait test acquired a blocking/input syscall")
+
+    probe = repo / "build/phase_b_header_probe.c"
+    probe.write_text(
+        "#include <platform.h>\n"
+        "#include <net/net_platform.h>\n"
+        "static int cancel(void *p) { return p != 0; }\n"
+        "int main(void) { net_cancel_callback cb = cancel;\n"
+        "return cb(0) + (int)clock_monotonic_ms(); }\n",
+        encoding="ascii",
+    )
+    run(
+        [
+            "clang",
+            "-target",
+            "i386-unknown-none-elf",
+            "-m32",
+            "-march=i386",
+            "-mno-sse",
+            "-mno-mmx",
+            "-ffreestanding",
+            "-nostdlib",
+            "-Itransport/lib",
+            "-std=c90",
+            "-pedantic-errors",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-fsyntax-only",
+            str(probe),
+        ],
+        repo,
+    )
+
+
 def reject_corrupt_images(repo: Path) -> None:
     source = repo / "build/mini_os.img"
     corrupt = repo / "build/corrupt-boot-id.img"
@@ -1017,6 +1063,14 @@ def verify_per_application_libraries(repo: Path) -> None:
     if (repo / "build/transport/lib/ssh/dependency_probe.o").exists():
         raise RuntimeError("non-SSH network application acquired SSH objects")
 
+    platform_object = repo / "build/transport/lib/net/platform.o"
+    time_object = repo / "build/transport/lib/net/time.o"
+    if not platform_object.is_file() or not time_object.is_file():
+        raise RuntimeError("network platform objects were not compiled")
+    platform_symbols = run(["nm", "-u", str(platform_object)], repo).stdout
+    if "kbd_poll_key" not in platform_symbols or "getchar" in platform_symbols:
+        raise RuntimeError("production cancellation adapter is not nonblocking")
+
     run(["make", "app", "APP=ssh.c"], repo)
     if not (repo / "build/transport/lib/ssh/dependency_probe.o").is_file():
         raise RuntimeError("SSH application did not acquire its private objects")
@@ -1050,6 +1104,7 @@ def main() -> int:
         run(["build/check_layout"], repo)
         verify_kernel_entry_stub(repo)
         run(["build/check_image", "build/mini_os.img"], repo)
+        verify_phase_b_platform(repo)
         reject_corrupt_images(repo)
         reject_reserved_injector_names(repo)
         reject_unsafe_injector_targets(repo)

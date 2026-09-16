@@ -54,9 +54,11 @@ Before its first call, the kernel initializes the lower kernel-stack canary and 
 
 The kernel then clears the retired real-mode boot stack, the unused tail of its 100-sector reservation, all six work buffers, both frame buffers, the complete interrupt-stack reservation, and the complete application image during early initialization.
 
-The IDT initializer separately clears its full 2 KiB region before installing the system-call gate.
+The IDT initializer separately clears its full 2 KiB region before installing present fatal defaults, processor-exception gates, remapped PIC IRQ gates, and the system-call trap gate.
 
-The remaining canary pages are filled with byte value `0xA5`, after which the kernel exercises the lower boundary of the reserved interrupt stack while interrupts are disabled, restores the test word to zero, and verifies all canaries before mounting the filesystem.
+The remaining canary pages are filled with byte value `0xA5`, after which the kernel exercises the lower boundary of the interrupt stack while interrupts are disabled, restores the test word to zero, and verifies all canaries before initializing interrupt delivery.
+
+The PIC startup self-test then enters the common IRQ path for IRQ0, masked IRQ1, and masked slave IRQ8 while IF remains clear. Each entry saves its original context, switches to the dedicated stack, returns to an intact sentinel on the kernel stack, and leaves every canary valid before the PIT is programmed and interrupts are enabled.
 
 Before every application run, the loader clears the complete application image, heap, argument block, and stack, then recreates the heap and application-stack canaries.
 
@@ -88,4 +90,4 @@ The legacy BIOS checks establish the two contiguous RAM spans actually required 
 
 Applications are trusted Ring 0 code, so canaries detect selected boundary corruption after control returns but cannot prevent arbitrary writes or recover from corruption.
 
-The interrupt stack is initialized and boundary-tested as reserved system memory, but current hardware interrupts remain disabled and no runtime interrupt-stack switch is performed yet.
+The interrupt stack is active system memory used only by the non-nested common hardware-IRQ path. System calls continue to use the trusted application's bounded stack, and processor exceptions switch to the known interrupt-stack top only for non-returning fatal diagnostics.

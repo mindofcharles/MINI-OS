@@ -10,7 +10,7 @@ Application and executable-test source under `transport/apps/` and `transport/li
 
 The runtime implementation under `transport/lib/` intentionally uses modern C and is built separately.
 
-Flat application binaries are loaded into the 512 KiB region at `0x00100000`, with a 32 KiB stack growing down from `0x001CB000`. System calls use the `int 0x80` interrupt gate.
+Flat application binaries are loaded into the 512 KiB region at `0x00100000`, with a 32 KiB stack growing down from `0x001CB000`. System calls use the `int 0x80` trap gate, while hardware IRQs use interrupt gates and a separate 16 KiB interrupt stack.
 
 Applications are not isolated processes. They execute in Ring 0 in the same flat address space as the kernel, so only trusted binaries should be run.
 

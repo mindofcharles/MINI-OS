@@ -12,31 +12,68 @@ idt_descriptor:
     dd IDT_BASE
 
 idt_init:
-    push eax
-    push ecx
-    push edi
+    pushad
 
     ; Zero the complete shared-layout IDT region.
     mov edi, IDT_BASE
     mov ecx, IDT_SIZE
     call zero_buffer
 
-    ; Register int 0x80 (syscall) at entry 0x80 (128)
-    mov edi, IDT_BASE + (0x80 * 8)
-    mov eax, syscall_entry
+    ; Give every vector a present Ring-0 fatal gate before installing the
+    ; architected exception, remapped PIC, and syscall entries.
+    xor ecx, ecx
+.default_loop:
+    mov eax, unexpected_vector_stub
+    mov dl, 0x8E
+    call idt_set_gate
+    inc ecx
+    cmp ecx, 256
+    jb .default_loop
 
+    xor ecx, ecx
+.exception_loop:
+    mov eax, [exception_stub_table + ecx * 4]
+    mov dl, 0x8E
+    call idt_set_gate
+    inc ecx
+    cmp ecx, 32
+    jb .exception_loop
+
+    xor ebx, ebx
+.irq_loop:
+    mov ecx, ebx
+    add ecx, PIC_MASTER_VECTOR
+    mov eax, [irq_stub_table + ebx * 4]
+    mov dl, 0x8E
+    call idt_set_gate
+    inc ebx
+    cmp ebx, 16
+    jb .irq_loop
+
+    ; A trap gate leaves IF unchanged so IRQ0 can advance while a trusted
+    ; application is inside a filesystem or console system call.
+    mov ecx, 0x80
+    mov eax, syscall_entry
+    mov dl, 0xEF
+    call idt_set_gate
+
+    lidt [idt_descriptor]
+    popad
+    ret
+
+; IN: EAX=handler, ECX=vector, DL=type/attribute
+idt_set_gate:
+    push edi
+    mov edi, ecx
+    shl edi, 3
+    add edi, IDT_BASE
     mov [edi], ax            ; Offset 0..15
     mov word [edi + 2], 0x08  ; Segment Selector (Code Segment)
     mov byte [edi + 4], 0    ; Reserved
-    mov byte [edi + 5], 0xEE  ; Type_attr: Present, Ring 3, 32-bit Interrupt Gate
+    mov [edi + 5], dl
     shr eax, 16
     mov [edi + 6], ax        ; Offset 16..31
-
-    lidt [idt_descriptor]
-
     pop edi
-    pop ecx
-    pop eax
     ret
 
 ; ----------------------------
@@ -82,6 +119,12 @@ syscall_entry:
     je near .sys_restore_screen
     cmp eax, SYS_NR_GET_CURSOR
     je near .sys_get_cursor
+    cmp eax, SYS_NR_CLOCK_MONOTONIC_MS
+    je near .sys_clock_monotonic_ms
+    cmp eax, SYS_NR_KBD_POLL_KEY
+    je near .sys_kbd_poll_key
+    cmp eax, SYS_NR_GET_RANDOM
+    je near .sys_get_random
 
     mov eax, SYS_ERR_INVALID
     jmp .syscall_return
@@ -213,6 +256,40 @@ syscall_entry:
     test al, al
     jz .sys_getkey_loop
     movzx eax, al
+    jmp .syscall_return
+
+.sys_clock_monotonic_ms:
+    mov eax, [monotonic_ms]
+    jmp .syscall_return
+
+.sys_kbd_poll_key:
+    call kbd_poll_char
+    movzx eax, al
+    jmp .syscall_return
+
+.sys_get_random:
+    test ecx, ecx
+    jz .sys_get_random_zero
+    cmp ecx, RANDOM_REQUEST_MAX
+    ja .sys_get_random_range
+    test ebx, ebx
+    jz .sys_get_random_invalid
+    mov edi, ebx
+    call random_fill
+    jc .sys_get_random_unavailable
+    mov eax, ecx
+    jmp .syscall_return
+.sys_get_random_zero:
+    xor eax, eax
+    jmp .syscall_return
+.sys_get_random_range:
+    mov eax, SYS_ERR_RANGE
+    jmp .syscall_return
+.sys_get_random_invalid:
+    mov eax, SYS_ERR_INVALID
+    jmp .syscall_return
+.sys_get_random_unavailable:
+    mov eax, SYS_ERR_UNAVAILABLE
     jmp .syscall_return
 
 .sys_write:

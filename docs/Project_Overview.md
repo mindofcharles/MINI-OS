@@ -4,12 +4,12 @@
 
 The implemented path is end-to-end:
 
-- bootloader -> kernel -> shell -> filesystem -> IDT/syscalls -> C90 app execution (`run`) -> persistent disk image
+- bootloader -> kernel -> exceptions/PIC/PIT -> filesystem mount -> shell -> C90 application loading (`run`) -> IDT/syscalls -> persistent disk operations
 
 ## Main Source Areas
 
 - `OS_src/boot/`: real-mode boot code and PM transition path
-- `OS_src/kernel/`: shell loop, IDT & syscalls, drivers, utilities
+- `OS_src/kernel/`: shell loop, exceptions, PIC/PIT, secure random, IDT & syscalls, drivers, utilities
 - `OS_src/kernel/fs/`: filesystem logic
 - `tools/`: host C tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`, `check_layout.c`)
 - `transport/`: host files injected into `/transport/` (strict-C90 apps and tests, modern-C runtime implementation, and `crt0`)

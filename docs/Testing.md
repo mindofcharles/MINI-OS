@@ -6,12 +6,15 @@
 make check-layout
 make check-image
 make network-phase0-check
+make test-network-host
 make test-e2e
 make test-build
 make test
 ```
 
 `make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs both build-policy and QEMU end-to-end regressions.
+
+`make test-network-host` builds and runs the separate deterministic clock, random, wrap, delayed-poll, and cancellation regression without linking the production syscall adapter.
 
 `make test-build` first runs the pinned network-feasibility manifest and compiler-helper regression without downloading or compiling external SSH sources.
 
@@ -50,6 +53,10 @@ It boots and asserts:
 - A forced A20 verification failure prints its dedicated boot marker and halts before protected mode.
 - A deliberately undersized 1 MiB machine prints the dedicated `M` marker and halts before the kernel is loaded.
 - The exact `make run-network` TCG, RDRAND, user-network, and NE2000 device configuration reaches the shell with 4 MiB of guest memory.
+- Real divide-error and general-protection exceptions reach the normalized fatal handler with the expected vectors and zero or hardware-supplied error code.
+- Startup completes only after software-triggered IRQ0, masked IRQ1, and masked slave IRQ8 traverse the common dedicated-stack path with restored registers, segment selectors, direction flag and stack state, exact master/slave EOI counts, and intact canaries.
+- The monotonic counter advances while a strict-C90 application repeatedly uses the nonblocking keyboard syscall and filesystem read syscalls.
+- A 1,024-byte secure-random request succeeds under `-accel tcg -cpu max,rdrand=on`, while both `-accel tcg -cpu qemu32,rdrand=off` and a CPUID-free `-cpu 486` return unavailable and clear the full destination.
 - The existing strict-C90 `hello` application retains its exact greeting and integer-format output before a clean guarded return.
 - Exact string, formatting, heap, BSS, syscall, and stream test results are verified.
 - Heap exhaustion returns failure, the freed heap remains reusable, and the post-application heap guard remains intact.
@@ -79,6 +86,10 @@ It boots and asserts:
 - build-time proof that every platform memory range is aligned, firmware-backed, bounded, and non-overlapping;
 - a binary-level assertion that the kernel image starts with an executable jump whose destination lies inside the image;
 - GNU C11 compilation of `transport/lib` and strict C90 flags for apps/tests;
+- strict-C90 parsing of the platform and network-platform public headers;
+- deterministic host checks for wrapping elapsed time, maximum duration, delayed polling, callback cancellation, and advancing fake random state;
+- binary proof that the deterministic platform marker exists in its test executable but is absent from the production image;
+- symbol inspection proving that the deterministic wait test does not import `getchar` or `kbd_poll_key`;
 - rejection of a generated C99-only application probe;
 - rejection of an unfinished mutation, cyclic FAT, impossible file sizes, and reserved directory names by the image checker;
 - rejection of `.`, `..`, and slash-containing injector target names without modifying the image;

@@ -22,7 +22,7 @@ zero_sector:
     ret
 
 ; Fill and verify the memory guards shared by the application, kernel, and
-; future interrupt stack. These guards detect boundary corruption but are not
+; dedicated interrupt stack. These guards detect boundary corruption but are not
 ; a privilege or paging boundary.
 platform_layout_initialize:
     pushad

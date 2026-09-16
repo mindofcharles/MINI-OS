@@ -204,6 +204,25 @@ kernel_start:
     call vga_print
 
     call idt_init
+%ifdef KERNEL_TEST_EXCEPTION_NO_ERROR
+    xor edx, edx
+    mov eax, 1
+    div edx
+%endif
+%ifdef KERNEL_TEST_EXCEPTION_ERROR
+    mov ax, 0x18
+    mov ds, ax
+%endif
+    call random_initialize
+    call interrupts_initialize
+    test eax, eax
+    jnz .interrupts_ready
+    mov esi, msg_interrupt_fatal
+    call vga_print
+    jmp kernel_interrupt_halt
+.interrupts_ready:
+    sti
+    nop
     call fs_bootstrap
     cmp eax, FS_OK
     je .fs_ready
@@ -253,6 +272,14 @@ kernel_layout_halt:
     hlt
     jmp kernel_layout_halt
 
+kernel_interrupt_halt:
+    cli
+    hlt
+    jmp kernel_interrupt_halt
+
+%include "OS_src/kernel/timer.asm"
+%include "OS_src/kernel/random.asm"
+%include "OS_src/kernel/interrupts.asm"
 %include "OS_src/kernel/idt.asm"
 %include "OS_src/kernel/shell.asm"
 %include "OS_src/kernel/fs.asm"
@@ -264,6 +291,7 @@ kernel_layout_halt:
 ; ----------------------------
 msg_boot           db "MINI_OS: booting kernel...", 10, 0
 msg_layout_fatal   db "MINI_OS: platform memory guard failed; system halted.", 10, 0
+msg_interrupt_fatal db "MINI_OS: interrupt initialization failed; system halted.", 10, 0
 msg_mount_ok       db "MINI_OS: filesystem detected.", 10, 0
 msg_format_ok      db "MINI_OS: format complete.", 10, 0
 msg_wrong_device   db "MINI_OS: boot device does not match primary ATA master; writes refused.", 10, 0

@@ -316,6 +316,19 @@ kbd_read_char_blocking:
     test al, 1
     jz .wait_key
 
+    jmp kbd_read_pending_char
+
+; OUT: AL = ASCII char, 0 if no raw byte is pending or it is unsupported
+kbd_poll_char:
+    mov dx, KBD_STATUS_PORT
+    in al, dx
+    test al, 1
+    jnz kbd_read_pending_char
+    xor al, al
+    ret
+
+kbd_read_pending_char:
+
     mov dx, KBD_DATA_PORT
     in al, dx
 

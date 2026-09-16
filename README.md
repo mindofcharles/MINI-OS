@@ -21,10 +21,11 @@ The documentation and some comments were written by Gemini and GPT. A small part
 
 - BIOS boot loader with firmware memory checks, EDD probing, per-sector retries, CHS fallback, and verified A20 enablement before high memory is used
 - Protected-mode kernel image at `0x8000`, beginning with an executable entry jump to `kernel_start`
-- VGA text console and polling keyboard input
+- VGA text console with blocking and nonblocking polling keyboard input
 - checked ATA PIO disk I/O (`LBA28`, primary-channel master sector read/write) with boot-image identity verification before mount
 - Custom filesystem with persistent directory tree and fail-stop detection of interrupted mutations
-- IDT Interrupt Table & `int 0x80` System Call Engine for console, heap, file, and cursor services
+- Complete IDT with fatal exception diagnostics, remapped 8259 IRQs, a dedicated interrupt stack, and PIT IRQ0 monotonic timekeeping
+- `int 0x80` System Call Engine for console, heap, file, cursor, monotonic-clock, nonblocking-key, and RDRAND-backed secure-random services
 - FAT-chain executable loader (`run <file>`) for flat binaries up to 512 KiB at `0x00100000`
 - Modern-C runtime implementation with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
 - Tested API subset exposed through `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, and `<assert.h>`

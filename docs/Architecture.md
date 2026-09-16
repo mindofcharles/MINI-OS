@@ -15,16 +15,28 @@
 - Carries the host-generated image identity in immutable boot-sector bytes.
 - Performs protected-mode transition.
 
-### Layer 1: Kernel Core, IDT Syscalls, and Shell
+### Layer 1: Kernel Core, Interrupts, IDT Syscalls, and Shell
 
 - File: `OS_src/kernel/main.asm`
-- Initializes console and IDT interrupt table.
+- Initializes the console, the complete IDT, the secure-random capability probe, the remapped PIC, the dedicated interrupt-stack path, and the PIT before enabling maskable interrupts.
 - Verifies that the primary-master ATA target matches the BIOS-loaded image, then requires a clean, valid filesystem.
 - Enters perpetual REPL shell loop.
 
 - File: `OS_src/kernel/idt.asm`
 - Manages 256-entry IDT table at physical memory `0x00026000`.
-- Implements the `int 0x80` system call handler for console I/O, heap control, filesystem streams, and cursor services. Calls 1, 3--7, 12, 14, 15, and 19--25 are implemented. The complete register, return-value, flag, and error contract is in [`Syscall_ABI.md`](Syscall_ABI.md).
+- Installs fatal defaults for every vector, normalized processor-exception entries for vectors 0 through 31, remapped hardware-IRQ entries for vectors `0x20..0x2F`, and the `int 0x80` trap gate.
+- Implements the system call handler for console I/O, heap control, filesystem streams, cursor services, monotonic time, nonblocking keyboard polling, and secure random bytes. Calls 1, 3--7, 12, 14, 15, and 19--28 are implemented. The complete register, return-value, flag, and error contract is in [`Syscall_ABI.md`](Syscall_ABI.md).
+
+- File: `OS_src/kernel/interrupts.asm`
+- Normalizes exception frames with and without hardware error codes and reports fatal vector/error diagnostics.
+- Remaps the master and slave 8259 PICs to vectors `0x20` and `0x28`, masks every line except IRQ0, uses one EOI path, and runs non-nested IRQ handlers on the dedicated interrupt stack.
+- Performs an interrupt-disabled startup self-test covering IRQ0, a masked master IRQ, a masked slave IRQ, exact master/slave EOI counts, complete interrupted-context restoration, and canary preservation.
+
+- File: `OS_src/kernel/timer.asm`
+- Programs PIT channel 0 in rate-generator mode with divisor 1,193 and advances a wrapping 32-bit millisecond counter on IRQ0.
+
+- File: `OS_src/kernel/random.asm`
+- Detects CPUID before testing the RDRAND feature bit and implements bounded all-or-nothing random fills with no fallback source.
 
 - File: `OS_src/kernel/shell.asm`
 - Tokenizes command line (`cmd arg1 arg2`).
@@ -36,7 +48,7 @@
 
 - File: `OS_src/kernel/drivers.asm`
 - ATA PIO sector read/write (`LBA28`, primary-channel master only) with bounded readiness waits and `ERR`/`DF` propagation.
-- Polling IBM PC/AT Set 1 keyboard input using a US-layout mapping.
+- Blocking and nonblocking IBM PC/AT Set 1 keyboard polling using a shared US-layout translator.
 - VGA text-mode rendering and cursor control.
 
 ### Layer 3: Storage and Utilities
@@ -122,6 +134,18 @@ The marker detects an ambiguous result, but it does not guarantee that earlier s
 Applications are trusted Ring 0 code in the kernel's flat address space.
 
 The syscall ABI organizes application access to kernel services, but it does not provide privilege or memory isolation.
+
+### Interrupt Delivery and Time
+
+Processor exceptions enter normalized fatal handling with a vector and error-code pair, including an inserted zero for exceptions that do not receive a hardware error code.
+
+Every hardware IRQ first saves general-purpose and segment registers on the interrupted stack, installs the known flat data selector, switches to `0x00095000` as the top of the dedicated interrupt stack, dispatches with IF clear, sends EOI through the single PIC path, restores the original stack and registers, and returns with `iretd`.
+
+Only PIT IRQ0 is unmasked. The handler increments a 32-bit counter once per approximately one-millisecond period and sends one master EOI, while the common slave path sends one slave EOI followed by one master EOI.
+
+The syscall descriptor is a trap gate so timer IRQs can interrupt trusted application system calls, including ATA-backed file reads. Other IRQ gates remain interrupt gates, and the common entry treats attempted maskable nesting as fatal.
+
+Secure random requests are independent of the timer. They use CPUID-qualified RDRAND with a ten-attempt bound for every 32-bit word, return only complete fills, and clear the requested destination on source failure.
 
 ### Path Resolution
 

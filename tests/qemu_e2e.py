@@ -66,23 +66,22 @@ def run_checked(command: list[str], cwd: Path) -> None:
 def prepare_debug_image(
     repo: Path, source: Path, destination: Path, force_chs: bool = False,
     force_a20_failure: bool = False,
+    kernel_defines: Optional[list[str]] = None,
 ) -> None:
     kernel = destination.with_suffix(".kernel.bin")
     boot = destination.with_suffix(".boot.bin")
-    run_checked(
-        [
-            "nasm",
-            "-w-label-redef-late",
-            "-d",
-            "ENABLE_DEBUGCON=1",
-            "-f",
-            "bin",
-            "OS_src/kernel/main.asm",
-            "-o",
-            str(kernel),
-        ],
-        repo,
+    kernel_command = [
+        "nasm",
+        "-w-label-redef-late",
+        "-d",
+        "ENABLE_DEBUGCON=1",
+    ]
+    for definition in kernel_defines or []:
+        kernel_command.extend(["-d", definition])
+    kernel_command.extend(
+        ["-f", "bin", "OS_src/kernel/main.asm", "-o", str(kernel)]
     )
+    run_checked(kernel_command, repo)
     kernel_bytes = kernel.read_bytes()
     sectors = (len(kernel_bytes) + 511) // 512
     if sectors > KERNEL_MAX_SECTORS:
@@ -333,6 +332,10 @@ def smoke_test(vm: VirtualMachine, program: Optional[str] = None,
     vm.command_expect(
         "run /transport/build/lib_test/test_stack.bin", "STACK CANARY TEST: PASS"
     )
+    vm.command_expect(
+        "run /transport/build/lib_test/test_platform.bin",
+        "PLATFORM TIMER TEST: PASS",
+    )
     if program is not None:
         vm.command_expect("run " + program, expected)
     vm.command_expect("pwd", "/ > ")
@@ -516,9 +519,72 @@ def network_run_configuration_test(
     )
     try:
         vm.start()
+        vm.command_expect(
+            "run /transport/build/lib_test/test_platform.bin random",
+            "RANDOM TEST: PASS",
+        )
         vm.command_expect("pwd", "/ > ")
     finally:
         vm.stop()
+
+
+def random_unavailable_test(
+    repo: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    cases = (
+        ("feature-off", ["-accel", "tcg", "-cpu", "qemu32,rdrand=off"]),
+        ("no-cpuid", ["-accel", "tcg", "-cpu", "486"]),
+    )
+    for index, (name, extra_args) in enumerate(cases):
+        image = temp / f"mini_os_random_unavailable_{name}.img"
+        prepare_debug_image(repo, source, image)
+        vm = VirtualMachine(
+            image,
+            temp / f"session-random-unavailable-{name}.log",
+            qemu,
+            -28 - index,
+            extra_args=extra_args,
+        )
+        try:
+            vm.start()
+            vm.command_expect(
+                "run /transport/build/lib_test/test_platform.bin unavailable",
+                "RANDOM UNAVAILABLE TEST: PASS",
+            )
+        finally:
+            vm.stop()
+
+
+def exception_handling_test(
+    repo: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    cases = (
+        (
+            "no-error",
+            "KERNEL_TEST_EXCEPTION_NO_ERROR=1",
+            "MINI_OS: fatal exception vector=0x00000000 error=0x00000000; system halted.",
+        ),
+        (
+            "with-error",
+            "KERNEL_TEST_EXCEPTION_ERROR=1",
+            "MINI_OS: fatal exception vector=0x0000000D error=0x00000018; system halted.",
+        ),
+    )
+    for index, (name, definition, expected) in enumerate(cases):
+        image = temp / f"mini_os_exception_{name}.img"
+        prepare_debug_image(
+            repo, source, image, kernel_defines=[definition]
+        )
+        vm = VirtualMachine(
+            image,
+            temp / f"session-exception-{name}.log",
+            qemu,
+            -29 - index,
+        )
+        try:
+            vm.start(expected)
+        finally:
+            vm.stop()
 
 
 def machine_compatibility_test(
@@ -864,6 +930,10 @@ def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> 
             "STACK CANARY TEST: PASS",
         )
         first.command_expect(
+            "run /transport/build/lib_test/test_platform.bin",
+            "PLATFORM TIMER TEST: PASS",
+        )
+        first.command_expect(
             "run /transport/build/lib_test/test_file.bin",
             "SYSCALL/STREAM TESTS PASSED",
         )
@@ -961,7 +1031,9 @@ def main() -> int:
         else:
             insufficient_memory_test(repo, source_image, args.qemu, temp)
             a20_failure_test(repo, source_image, args.qemu, temp)
+            exception_handling_test(repo, source_image, args.qemu, temp)
             network_run_configuration_test(repo, source_image, args.qemu, temp)
+            random_unavailable_test(repo, source_image, args.qemu, temp)
             forced_chs_test(repo, checker, source_image, args.qemu, temp)
             prepare_debug_image(repo, source_image, debug_image)
             memory_guard_failure_test(debug_image, args.qemu, temp)

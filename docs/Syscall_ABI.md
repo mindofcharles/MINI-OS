@@ -4,7 +4,9 @@ Applications are trusted Ring 0 code in the kernel's flat address space.
 
 The `int 0x80` interface is an ABI convention, not a privilege or isolation boundary.
 
-Pointer arguments are trusted and are not copied from or validated as user memory.
+Pointer arguments are trusted and are not copied through a protected user-memory boundary, although individual calls still reject null pointers and invalid lengths where their own contracts require it.
+
+The `int 0x80` descriptor is a 32-bit trap gate, so an already enabled IRQ0 remains deliverable during a system call. Hardware IRQ descriptors remain interrupt gates and therefore keep maskable IRQ handlers non-nested.
 
 ## Register Convention
 
@@ -34,10 +36,19 @@ Pointer arguments are trusted and are not copied from or validated as user memor
 | 23 | `save_screen` | — | — | — | 0; saves 4,000 VGA bytes and cursor position |
 | 24 | `restore_screen` | — | — | — | 0; restores saved VGA state and cursor |
 | 25 | `get_cursor` | — | — | — | `row * 80 + column` |
+| 26 | `clock_monotonic_ms` | — | — | — | low unsigned 32 bits of monotonic milliseconds |
+| 27 | `kbd_poll_key` | — | — | — | 0 if no translated key is pending, otherwise a positive key code |
+| 28 | `get_random` | destination | byte count | — | exact byte count, or a negative error after failure |
 
 `read` blocks until input is available, echoes accepted characters, handles backspace, and does not place the terminating newline in the destination. `getkey` returns the driver's translated Set 1 key value, including the control codes used by `vedit`.
 
 `brk` starts at `0x00180000`, accepts values through the exclusive heap end `0x001C0000`, and resets to the start when an application exits.
+
+`clock_monotonic_ms` wraps modulo 2^32 and is intended for unsigned elapsed-time subtraction rather than direct absolute ordering.
+
+`kbd_poll_key` consumes at most one pending Set 1 controller byte, updates keyboard modifier state when necessary, and never waits for input.
+
+`get_random` accepts a zero-length request without inspecting the pointer, rejects nonzero null requests and lengths above 1,024, and has no weak fallback. It uses RDRAND only after CPUID feature detection, retries each 32-bit sample at most ten times, fills the entire request before reporting success, and clears the complete requested destination before returning `SYS_ERR_UNAVAILABLE` after an unavailable source or exhausted retry budget.
 
 ## Open Flags and File Descriptors
 
@@ -64,6 +75,7 @@ The application file table has 13 slots, numbered 3 through 15, and is cleared o
 | -3 | `SYS_ERR_ACCESS` | descriptor mode rejects the operation |
 | -4 | `SYS_ERR_IO` | filesystem metadata or ATA operation failed |
 | -5 | `SYS_ERR_RANGE` | seek or write would exceed filesystem limits |
+| -6 | `SYS_ERR_UNAVAILABLE` | required platform capability or device is unavailable |
 
 The stream functions in `minilibc` translate these calls into `FILE` state.
 

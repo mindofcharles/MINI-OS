@@ -75,18 +75,22 @@ LIBSSH2_SOURCE ?=
 MBEDTLS_SOURCE ?=
 WOLFSSH_SOURCE ?=
 WOLFSSL_SOURCE ?=
+NETWORK_PHASE_B_TEST_BIN := $(BUILD_DIR)/network-phase-b/platform_test
+NETWORK_PHASE_B_TEST_SRCS := tests/network_phase_b/test_platform.c tests/network_phase_b/deterministic_platform.c $(LIB_DIR)/net/time.c
 
 TARGET_CFLAGS := -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -I$(LIB_DIR)
 LIB_CFLAGS := $(TARGET_CFLAGS) -std=gnu11
 APP_CFLAGS := $(TARGET_CFLAGS) -std=c90 -pedantic-errors -Wall -Wextra -Werror
-HOST_CFLAGS := -O2 -std=c11 -Wall -Wextra -Werror
+HOST_SYSROOT := $(shell if [ "$$(uname -s)" = Darwin ]; then xcrun --sdk macosx --show-sdk-path 2>/dev/null; fi)
+HOST_CFLAGS := -O2 -std=c11 -Wall -Wextra -Werror $(if $(HOST_SYSROOT),-isysroot $(HOST_SYSROOT))
+HOST_ENV := $(if $(HOST_SYSROOT),SDKROOT=$(HOST_SYSROOT))
 ELF2BIN_MAX_OBJECTS ?= 256
 ELF2BIN_MAX_SYMBOLS ?= 4096
 ELF2BIN_MAX_SECTIONS ?= 4096
 ELF2BIN_MAX_RELOCATIONS ?= 32768
 QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
 
-.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe
+.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network-host network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe
 
 all: check-layout $(OS_IMG)
 
@@ -192,36 +196,43 @@ check-image: $(OS_IMG) $(CHECK_TOOL)
 	$(CHECK_TOOL) $(OS_IMG)
 
 network-phase0-check:
-	bash $(NETWORK_PHASE0_TOOL) --check-manifest
+	$(HOST_ENV) bash $(NETWORK_PHASE0_TOOL) --check-manifest
 
 network-phase0-selected: network-phase0-check
 	@if [ -z "$(LIBSSH2_SOURCE)" ] || [ -z "$(MBEDTLS_SOURCE)" ]; then \
 		echo "Usage: make network-phase0-selected LIBSSH2_SOURCE=/path/to/libssh2 MBEDTLS_SOURCE=/path/to/mbedtls"; \
 		exit 1; \
 	fi
-	bash $(NETWORK_PHASE0_TOOL) selected "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
+	$(HOST_ENV) bash $(NETWORK_PHASE0_TOOL) selected "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
 
 network-phase0: network-phase0-check
 	@if [ -z "$(LIBSSH2_SOURCE)" ] || [ -z "$(MBEDTLS_SOURCE)" ] || [ -z "$(WOLFSSH_SOURCE)" ] || [ -z "$(WOLFSSL_SOURCE)" ]; then \
 		echo "Usage: make network-phase0 LIBSSH2_SOURCE=/path/to/libssh2 MBEDTLS_SOURCE=/path/to/mbedtls WOLFSSH_SOURCE=/path/to/wolfssh WOLFSSL_SOURCE=/path/to/wolfssl"; \
 		exit 1; \
 	fi
-	bash $(NETWORK_PHASE0_TOOL) all "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(WOLFSSH_SOURCE)" "$(WOLFSSL_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
+	$(HOST_ENV) bash $(NETWORK_PHASE0_TOOL) all "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(WOLFSSH_SOURCE)" "$(WOLFSSL_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
 
 network-phase0-host-probe: network-phase0-check
 	@if [ -z "$(LIBSSH2_SOURCE)" ] || [ -z "$(MBEDTLS_SOURCE)" ]; then \
 		echo "Usage: make network-phase0-host-probe LIBSSH2_SOURCE=/path/to/libssh2 MBEDTLS_SOURCE=/path/to/mbedtls"; \
 		exit 1; \
 	fi
-	bash $(NETWORK_PHASE0_HOST_TOOL) "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
+	$(HOST_ENV) bash $(NETWORK_PHASE0_HOST_TOOL) "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
 
 test-build: network-phase0-check
-	$(PYTHON) tests/test_build.py
+	$(HOST_ENV) $(PYTHON) tests/test_build.py
 
 test-e2e: $(OS_IMG) $(CHECK_TOOL)
 	$(PYTHON) tests/qemu_e2e.py --image $(OS_IMG) --checker $(CHECK_TOOL)
 
-test: test-build test-e2e
+$(NETWORK_PHASE_B_TEST_BIN): $(NETWORK_PHASE_B_TEST_SRCS) $(LIB_DIR)/net/net_platform.h tests/network_phase_b/deterministic_platform.h Makefile | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_CFLAGS) $(NETWORK_PHASE_B_TEST_SRCS) -o $@
+
+test-network-host: $(NETWORK_PHASE_B_TEST_BIN)
+	$(NETWORK_PHASE_B_TEST_BIN)
+
+test: test-network-host test-build test-e2e
 
 run: $(OS_IMG)
 	$(QEMU) -m $(QEMU_MEMORY) -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk

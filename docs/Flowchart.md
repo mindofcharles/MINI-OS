@@ -27,7 +27,12 @@ graph TD
     KS --> G[Kernel: Initialize VGA 0xB8000 & Hardware Cursor]
     G --> LG{Clear Fixed Regions,<br/>Exercise Interrupt Stack,<br/>and Verify Canaries?}
     LG -- No --> LF[Print Memory-Guard Error and Halt]
-    LG -- Yes --> H[Kernel: Read Primary-Master LBA 0]
+    LG -- Yes --> IDT[Install Fatal Defaults,<br/>Exceptions 0..31, PIC IRQs,<br/>and int 0x80 Trap Gate]
+    IDT --> RI[Detect CPUID and RDRAND]
+    RI --> IRQ{Remap and Mask PIC,<br/>Run Dedicated-Stack IRQ/EOI Self-Test,<br/>Program PIT Channel 0?}
+    IRQ -- No --> IRQF[Print Interrupt Initialization Error and Halt]
+    IRQ -- Yes --> STI[Enable Maskable Interrupts]
+    STI --> H[Kernel: Read Primary-Master LBA 0]
     H --> HI{Boot Code, 48-bit Image ID,<br/>and Kernel Sample Match?}
     HI -- No --> HF[Print Wrong-Device Error and Halt<br/>No Disk Writes]
     HI -- Yes --> I{Superblock Valid and<br/>Mutation Marker Clear?}

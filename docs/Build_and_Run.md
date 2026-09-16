@@ -95,6 +95,14 @@ make network-phase0 \
 
 The pinned revisions, probe configuration, generated outputs, and host-probe procedure are documented with the reproducible tooling in [`tools/network_phase0/README.md`](../tools/network_phase0/README.md).
 
+The deterministic platform regression runs entirely on the host and does not require external sources:
+
+```bash
+make test-network-host
+```
+
+This target creates `build/network-phase-b/platform_test` by substituting a test-only clock, random source, and cancellation callback for the production syscall adapter. Its marker is checked for absence from `build/mini_os.img` by the build regression.
+
 ## 4. Run in QEMU
 
 ```bash
@@ -112,6 +120,8 @@ The 4 MiB value is derived from `PLATFORM_CONFIGURED_MEMORY_BYTES` in `OS_src/ke
 The bootloader separately checks the firmware-reported spans required through `0x00095000` below the legacy-memory hole and through `0x001CB000` above one MiB; the full contract is documented in [`Memory_Layout.md`](Memory_Layout.md).
 
 The network-oriented QEMU configuration can be launched with `make run-network`, which additionally selects QEMU TCG with RDRAND enabled and attaches a user-mode backend to an NE2000 ISA device at I/O base `0x300`, IRQ 9, and MAC address `52:54:00:12:34:56`.
+
+The current secure-random syscall requires the advertised RDRAND feature. `make run-network` provides the accepted positive emulator configuration, while CPUs without that feature receive an explicit unavailable error and never fall back to the runtime `rand()` generator.
 
 The explicit IDE index is part of the current driver contract because protected-mode filesystem I/O addresses the primary ATA channel's master device directly after the BIOS loads the kernel.
 

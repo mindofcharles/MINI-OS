@@ -853,6 +853,7 @@ shell_run_load_done:
 return_to_shell:
     mov esp, [saved_kernel_esp]
     cld
+    sti
     mov dword [current_brk], APP_HEAP_BASE
     call platform_verify_guards
     test eax, eax

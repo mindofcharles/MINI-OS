@@ -18,7 +18,8 @@ This document only describes code/file responsibilities.
   - complete kernel-stack clearing and lower-canary initialization before the first call
   - global constants (VGA, ATA, filesystem layout) and compile-time platform-layout assertions
   - global state buffers and scratch variables
-  - includes shell/fs/driver/utility modules
+  - orders IDT, random-source, PIC, PIT, filesystem, and shell initialization before entering the prompt
+  - includes interrupt/timer/random/syscall/shell/fs/driver/utility modules
 - `OS_src/kernel/platform_layout.def`
   - shared boot, kernel, work-buffer, network-buffer, application-image, heap, argument, stack, canary, configured-memory, and firmware-required-memory constants
 
@@ -34,14 +35,21 @@ This document only describes code/file responsibilities.
 ## 4. Interrupts & System Calls
 
 - `OS_src/kernel/idt.asm`
-  - IDT table setup (`lidt`)
-  - `int 0x80` system call gate handler for calls 1, 3--7, 12, 14, 15, and 19--25; see `docs/Syscall_ABI.md` for the complete contract
+  - complete IDT table setup (`lidt`) with fatal defaults, exception entries, PIC IRQ entries, and the syscall trap gate
+  - `int 0x80` handler for calls 1, 3--7, 12, 14, 15, and 19--28; see `docs/Syscall_ABI.md` for the complete contract
+- `OS_src/kernel/interrupts.asm`
+  - normalized fatal exception entries for vectors 0--31
+  - 8259 remap, explicit masks, startup IRQ/EOI self-test, non-nested dedicated-stack common IRQ entry, and single EOI path
+- `OS_src/kernel/timer.asm`
+  - PIT channel-0 rate generator and wrapping monotonic-millisecond state
+- `OS_src/kernel/random.asm`
+  - CPUID/RDRAND capability detection and bounded all-or-nothing secure-random fills
 
 ## 5. Driver Layer
 
 - `OS_src/kernel/drivers.asm`
   - checked primary-master ATA PIO read/write helpers (LBA28)
-  - polling Set 1 / US-layout keyboard translation
+  - blocking and nonblocking Set 1 / US-layout keyboard polling through one translator
   - VGA text-mode output/cursor helpers, including row-crossing backspace
 
 ## 6. Utility Layer
@@ -79,8 +87,9 @@ This document only describes code/file responsibilities.
 - `transport/lib/`
   - `crt0.asm`: C runtime startup file (`_start`)
   - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
+  - `platform.h`: C90-compatible monotonic-clock, nonblocking-key, and secure-random declarations
   - `compiler_rt.c`: modern-C unsigned 64-bit division and remainder helpers linked only where required
-  - `net/`: modern-C network implementation directory
+  - `net/`: modern-C network implementation directory, including wrap-safe time helpers and production platform/cancellation adapters
   - `ssh/`: modern-C SSH implementation directory
   - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
 - `transport/app.ld`
@@ -88,7 +97,7 @@ This document only describes code/file responsibilities.
 - `transport/apps/`
   - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
 - `transport/lib_test/`
-  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, `test_no_space.c`, `test_bss.c`, `test_stack.c`, and the isolated fail-stop probe `test_guard.c`
+  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, `test_no_space.c`, `test_bss.c`, `test_stack.c`, `test_platform.c`, and the isolated fail-stop probe `test_guard.c`
 - `transport/build/`
   - compiled flat binary outputs (`apps/*.bin`, `lib_test/*.bin`)
 
@@ -105,6 +114,8 @@ This document only describes code/file responsibilities.
 ## 10. Automated Test Drivers
 
 - `tests/qemu_e2e.py`
-  - boots temporary debug images, checks insufficient-memory and A20 failures, proves every canary-corruption fail-stop branch, checks the network launch configuration, drives the shell, asserts application guards and multi-block filesystem behavior, restarts and checks persistent state, injects ATA faults, verifies wrong-device refusal, and exercises the supported QEMU machine/CHS matrix
+  - boots temporary debug images, checks insufficient-memory and A20 failures, triggers both normalized exception-frame forms, verifies positive and unavailable RDRAND configurations, proves every canary-corruption fail-stop branch, checks timer progress and the network launch configuration, drives the shell, asserts application guards and multi-block filesystem behavior, restarts and checks persistent state, injects ATA faults, verifies wrong-device refusal, and exercises the supported QEMU machine/CHS matrix
 - `tests/test_build.py`
-  - checks clean and incremental builds, C language policy, per-application dependencies, layout assertions, parameterized linker limits, both exact-limit flat-binary paths, checker rejection, and every before/after sector-write failure point in the host injector transaction
+  - checks clean and incremental builds, C language policy, per-application dependencies, deterministic platform isolation, production-marker absence, layout assertions, parameterized linker limits, both exact-limit flat-binary paths, checker rejection, and every before/after sector-write failure point in the host injector transaction
+- `tests/network_phase_b/`
+  - deterministic clock/random/cancellation platform and host regression linked separately from production platform code
