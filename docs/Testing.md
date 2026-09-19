@@ -7,14 +7,24 @@ make check-layout
 make check-image
 make network-phase0-check
 make test-network-host
+make test-network-abi
+make test-network-driver
+make test-network-qemu
+make test-network
 make test-e2e
 make test-build
 make test
 ```
 
-`make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs both build-policy and QEMU end-to-end regressions.
+`make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs the host network, raw ABI, build-policy, deterministic NE2000, and general QEMU end-to-end regressions.
 
 `make test-network-host` builds and runs the separate deterministic clock, random, wrap, delayed-poll, and cancellation regression without linking the production syscall adapter.
+
+`make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
+
+`make test-network-driver` runs a deterministic Ethernet peer against QEMU's NE2000 model and retains packet captures plus debug-console logs under `build/test-artifacts/` only when the regression fails.
+
+`make test-network-qemu` combines the deterministic packet-socket driver regression with the canonical user-network QEMU end-to-end path, while `make test-network` additionally includes the host platform and raw ABI suites.
 
 `make test-build` first runs the pinned network-feasibility manifest and compiler-helper regression without downloading or compiling external SSH sources.
 
@@ -42,7 +52,9 @@ Any failure terminates the image build.
 
 The checker rejects empty or reversed ranges, ranges beyond the 4 MiB configured ceiling, ranges beyond either firmware-checked RAM span, inconsistent declared sizes, insufficient Ethernet frame buffers, malformed argument subranges, misplaced canaries, incorrect alignment, and every pairwise overlap.
 
-The build regression deliberately creates an overlap and separately lowers the conventional, extended, and configured-memory boundaries, requires every invalid definition to be rejected, restores the shared definition, and requires the valid layout to pass again.
+The build regression deliberately creates an overlap, separately lowers the conventional, extended, and configured-memory boundaries, and raises the shared raw-frame maximum beyond the buffers' frame-plus-alignment capacity.
+
+It requires every invalid definition to be rejected, proves that changing `raw.def` rebuilds the layout checker, restores both shared definitions, and requires the valid layout to pass again.
 
 ## QEMU Filesystem Regression
 
@@ -53,6 +65,7 @@ It boots and asserts:
 - A forced A20 verification failure prints its dedicated boot marker and halts before protected mode.
 - A deliberately undersized 1 MiB machine prints the dedicated `M` marker and halts before the kernel is loaded.
 - The exact `make run-network` TCG, RDRAND, user-network, and NE2000 device configuration reaches the shell with 4 MiB of guest memory.
+- The NE2000 diagnostic reports ABI version 1, the configured MAC address, I/O base, IRQ, MTU, normalized frame bounds, polling mode, and masked IRQ state.
 - Real divide-error and general-protection exceptions reach the normalized fatal handler with the expected vectors and zero or hardware-supplied error code.
 - Startup completes only after software-triggered IRQ0, masked IRQ1, and masked slave IRQ8 traverse the common dedicated-stack path with restored registers, segment selectors, direction flag and stack state, exact master/slave EOI counts, and intact canaries.
 - The monotonic counter advances while a strict-C90 application repeatedly uses the nonblocking keyboard syscall and filesystem read syscalls.
@@ -84,9 +97,11 @@ It boots and asserts:
 - a self-contained pinned network-feasibility manifest and compiler-helper regression before any external source is needed;
 - a clean default build and mandatory image verification;
 - build-time proof that every platform memory range is aligned, firmware-backed, bounded, and non-overlapping;
+- dependency and boundary proof that the layout checker reserves a private alignment byte beyond the shared maximum raw-frame length;
 - a binary-level assertion that the kernel image starts with an executable jump whose destination lies inside the image;
 - GNU C11 compilation of `transport/lib` and strict C90 flags for apps/tests;
 - strict-C90 parsing of the platform and network-platform public headers;
+- exact size and field-offset agreement for the versioned raw-network information structure;
 - deterministic host checks for wrapping elapsed time, maximum duration, delayed polling, callback cancellation, and advancing fake random state;
 - binary proof that the deterministic platform marker exists in its test executable but is absent from the production image;
 - symbol inspection proving that the deterministic wait test does not import `getchar` or `kbd_poll_key`;
@@ -114,3 +129,24 @@ It boots and asserts:
 Temporary repositories, images, logs, and debug kernels are removed when the test finishes.
 
 No source timestamps or tracked files in the working tree are changed.
+
+## NE2000 Raw-Frame Regression
+
+`tests/network_phase_c.py` boots isolated debug images connected to a localhost QEMU packet socket rather than relying on Internet access or host network privileges.
+
+The deterministic peer verifies:
+
+- exact 60-, 61-, and 1,514-byte outbound frames after the application immediately overwrites its caller buffer
+- strict pointer, transmit-length, receive-capacity, unavailable-device, and wrong-I/O-base errors
+- one over-capacity frame is consumed before later valid frames are delivered
+- an acknowledged 61-byte odd inbound frame preserves its exact logical length and contents
+- thirty-two acknowledged 1,000-byte frames advance the 58-page receive ring through two wraps without corruption or overrun
+- a synthetic overrun, Remote DMA timeout, and transmit timeout each increment the correct counter and complete a bounded reset
+- successful recovery restores an exact peer-visible transmission and leaves the driver ready
+- an injected recovery reset timeout enters a stable fatal state, increments the reset-timeout and fatal counters once, removes the available flag, and makes later frame operations return `SYS_ERR_DEVICE`
+- a binary marker proves that fault-injection hooks exist in isolated debug kernels and are absent from the production kernel
+- the filesystem image remains valid and the shell remains usable after network activity
+
+The peer protocol and QEMU monitor operations have explicit deadlines, so a stuck device path fails the test instead of hanging the suite.
+
+Successful runs delete stale Phase C failure artifacts and leave no new captures or debug-console logs behind.

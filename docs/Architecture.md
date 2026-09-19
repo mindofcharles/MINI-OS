@@ -18,14 +18,14 @@
 ### Layer 1: Kernel Core, Interrupts, IDT Syscalls, and Shell
 
 - File: `OS_src/kernel/main.asm`
-- Initializes the console, the complete IDT, the secure-random capability probe, the remapped PIC, the dedicated interrupt-stack path, and the PIT before enabling maskable interrupts.
+- Initializes the console, the complete IDT, the secure-random capability probe, the remapped PIC, the dedicated interrupt-stack path, and the PIT before enabling maskable interrupts, then probes the polling NE2000 transport after the PIT clock is live.
 - Verifies that the primary-master ATA target matches the BIOS-loaded image, then requires a clean, valid filesystem.
 - Enters perpetual REPL shell loop.
 
 - File: `OS_src/kernel/idt.asm`
 - Manages 256-entry IDT table at physical memory `0x00026000`.
 - Installs fatal defaults for every vector, normalized processor-exception entries for vectors 0 through 31, remapped hardware-IRQ entries for vectors `0x20..0x2F`, and the `int 0x80` trap gate.
-- Implements the system call handler for console I/O, heap control, filesystem streams, cursor services, monotonic time, nonblocking keyboard polling, and secure random bytes. Calls 1, 3--7, 12, 14, 15, and 19--28 are implemented. The complete register, return-value, flag, and error contract is in [`Syscall_ABI.md`](Syscall_ABI.md).
+- Implements the system call handler for console I/O, heap control, filesystem streams, cursor services, monotonic time, nonblocking keyboard polling, secure random bytes, and raw Ethernet frames. Calls 1, 3--7, 12, 14, 15, and 19--31 are implemented. The complete register, return-value, flag, and error contract is in [`Syscall_ABI.md`](Syscall_ABI.md).
 
 - File: `OS_src/kernel/interrupts.asm`
 - Normalizes exception frames with and without hardware error codes and reports fatal vector/error diagnostics.
@@ -45,6 +45,12 @@
 - Converts error codes into user-facing messages.
 
 ### Layer 2: Drivers
+
+- Files: `OS_src/kernel/net.asm` and the modules under `OS_src/kernel/net/ne2k/`
+- The network entry point orders implementation modules for definitions, lifecycle, Remote DMA, public frame operations, and persistent state.
+- Fixed-resource NE2000 reset, PROM identification, MAC extraction, word-wide Remote DMA, packet-RAM programming, synchronous transmission, nonblocking receive-ring polling, ring-wrap validation, capacity drops, overrun recovery, bounded reset, and stable diagnostics.
+- Keeps NIC IRQ delivery and PIC IRQ9 masked, while PIT IRQ0 continues to provide timeout progress through the syscall trap gate.
+- Exposes normalized 60-through-1,514-byte frames without preamble, SFD, or FCS; the complete contract is in [`Network_Raw_Transport.md`](Network_Raw_Transport.md).
 
 - File: `OS_src/kernel/drivers.asm`
 - ATA PIO sector read/write (`LBA28`, primary-channel master only) with bounded readiness waits and `ERR`/`DF` propagation.
@@ -146,6 +152,16 @@ Only PIT IRQ0 is unmasked. The handler increments a 32-bit counter once per appr
 The syscall descriptor is a trap gate so timer IRQs can interrupt trusted application system calls, including ATA-backed file reads. Other IRQ gates remain interrupt gates, and the common entry treats attempted maskable nesting as fatal.
 
 Secure random requests are independent of the timer. They use CPUID-qualified RDRAND with a ten-attempt bound for every 32-bit word, return only complete fills, and clear the requested destination on source failure.
+
+### Raw Ethernet Frame Transfer
+
+At startup, the kernel treats NE2000 absence as an optional-device state rather than a boot failure, while a valid device is reset, identified through its duplicated PROM, and programmed with a six-page transmit area and bounded receive ring.
+
+Transmit syscalls copy the complete normalized frame into the fixed kernel transmit buffer, complete the DP8390D-required dummy Remote Read, start Remote Write, and then return only after device completion or one bounded recovery attempt.
+
+Receive syscalls inspect at most one ring entry, validate its status, next-page pointer, byte count, normalized size, and calculated page advance, then either copy the frame, consume an over-capacity frame, or reset uncertain ring state.
+
+The driver uses the fixed buffers at `0x00027000` and `0x00028000`, including private odd-byte alignment space for an even RBCR transfer count, and never exposes NE2000 page addresses or registers through the C API.
 
 ### Path Resolution
 

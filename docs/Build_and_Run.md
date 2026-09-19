@@ -121,6 +121,14 @@ The bootloader separately checks the firmware-reported spans required through `0
 
 The network-oriented QEMU configuration can be launched with `make run-network`, which additionally selects QEMU TCG with RDRAND enabled and attaches a user-mode backend to an NE2000 ISA device at I/O base `0x300`, IRQ 9, and MAC address `52:54:00:12:34:56`.
 
+The kernel probes that device without making it a boot requirement, keeps IRQ9 masked, and exposes complete raw Ethernet frames through the polling syscalls documented in [`Network_Raw_Transport.md`](Network_Raw_Transport.md).
+
+The strict-C90 diagnostic can be run after `make run-network`:
+
+```text
+run /transport/build/apps/netdiag.bin
+```
+
 The current secure-random syscall requires the advertised RDRAND feature. `make run-network` provides the accepted positive emulator configuration, while CPUs without that feature receive an explicit unavailable error and never fall back to the runtime `rand()` generator.
 
 The explicit IDE index is part of the current driver contract because protected-mode filesystem I/O addresses the primary ATA channel's master device directly after the BIOS loads the kernel.
@@ -149,9 +157,11 @@ The fallback `elf2bin` capacities are explicit Make variables with defaults of 2
 
 ## 6. Dependency Tracking
 
-The kernel target depends on every assembly/layout include below `OS_src/kernel/`. Runtime and application targets depend on all public runtime headers and `syscall.def`.
+The kernel target depends on every assembly/layout include below `OS_src/kernel/` and the shared raw-frame definition.
 
-Ordinary applications link only `crt0` and `minilibc`, the named network applications `ping`, `netcat`, and `ssh` additionally link the modern-C network objects and compiler runtime, and only `ssh` links the modern-C SSH objects.
+The layout checker, runtime, and application targets also depend on the raw-frame definition where applicable, while runtime and application targets depend on all public runtime headers and `syscall.def`.
+
+Ordinary applications link only `crt0` and `minilibc`, the named network applications `netdiag`, `ping`, `netcat`, and `ssh` plus the raw-network executable test additionally link the modern-C network objects and compiler runtime, and only `ssh` links the modern-C SSH objects.
 
 The Makefile itself is also an input to generated tools, objects, binaries, and the final image, so flag or recipe changes trigger the required rebuild.
 
@@ -175,6 +185,10 @@ Symptom: image write or cleanup commands fail.
 make check-layout  # verify platform memory sizes, bounds, and non-overlap
 make check-image  # verify the current generated image
 make network-phase0-check  # verify pinned network-probe policy without external sources
+make test-network-abi  # verify every public raw-frame structure offset
+make test-network-driver  # exercise NE2000 frames, ring wrap, and recovery in QEMU
+make test-network-qemu  # run packet-socket and canonical user-network QEMU checks
+make test-network  # run all host, ABI, and QEMU network checks
 make test-build   # build policy, corruption rejection, and host write-fault transaction checks
 make test-e2e     # QEMU filesystem, persistence, disk-fault, device-safety, and boot-matrix checks
 make test         # all automated gates

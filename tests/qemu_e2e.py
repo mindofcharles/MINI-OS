@@ -523,6 +523,24 @@ def network_run_configuration_test(
             "run /transport/build/lib_test/test_platform.bin random",
             "RANDOM TEST: PASS",
         )
+        segment = vm.command_expect(
+            "run /transport/build/apps/netdiag.bin",
+            "/ > ",
+        )
+        for expected in (
+            "NE2000 state: ready",
+            "ABI version: 1",
+            "MAC: 52:54:00:12:34:56",
+            "I/O base: 0x300",
+            "IRQ: 9",
+            "MTU: 1500",
+            "Frame bounds: 60-1514",
+            "Driver flags: 0x1f",
+        ):
+            if expected not in segment:
+                raise RuntimeError(
+                    f"network diagnostic omitted {expected!r}:\n{segment}"
+                )
         vm.command_expect("pwd", "/ > ")
     finally:
         vm.stop()

@@ -2,7 +2,7 @@ BUILD_DIR := build
 SRC_DIR := OS_src
 BOOT_SRC := $(SRC_DIR)/boot/boot.asm
 KERNEL_SRC := $(SRC_DIR)/kernel/main.asm
-KERNEL_DEPS := $(shell find $(SRC_DIR)/kernel -type f \( -name '*.asm' -o -name '*.def' \) | sort) transport/lib/syscall.def
+KERNEL_DEPS := $(shell find $(SRC_DIR)/kernel -type f \( -name '*.asm' -o -name '*.def' \) | sort) transport/lib/syscall.def transport/lib/net/raw.def
 FS_LAYOUT_DEF := $(SRC_DIR)/kernel/fs/layout.def
 PLATFORM_LAYOUT_DEF := $(SRC_DIR)/kernel/platform_layout.def
 APP_LINKER_SCRIPT := transport/app.ld
@@ -38,7 +38,7 @@ APP_OBJ_DIR := $(BUILD_DIR)/transport
 CRT0_SRC := $(LIB_DIR)/crt0.asm
 MINILIBC_SRC := $(LIB_DIR)/minilibc.c
 COMPILER_RT_SRC := $(LIB_DIR)/compiler_rt.c
-LIB_HEADERS := $(shell find $(LIB_DIR) -type f -name '*.h' | sort) $(LIB_DIR)/syscall.def
+LIB_HEADERS := $(shell find $(LIB_DIR) -type f -name '*.h' | sort) $(LIB_DIR)/syscall.def $(LIB_DIR)/net/raw.def
 
 CRT0_OBJ := $(BUILD_DIR)/crt0.o
 MINILIBC_OBJ := $(BUILD_DIR)/minilibc.o
@@ -48,7 +48,7 @@ NET_LIB_SRCS := $(shell find $(LIB_DIR)/net -type f -name '*.c' 2>/dev/null | so
 SSH_LIB_SRCS := $(shell find $(LIB_DIR)/ssh -type f -name '*.c' 2>/dev/null | sort)
 NET_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_LIB_SRCS))
 SSH_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(SSH_LIB_SRCS))
-NETWORK_APP_NAMES := ping netcat ssh
+NETWORK_APP_NAMES := netdiag ping netcat ssh test_network
 SSH_APP_NAMES := ssh
 
 app_component_objects = $(strip $(if $(filter $(NETWORK_APP_NAMES),$(notdir $(1))),$(COMPILER_RT_OBJ) $(NET_LIB_OBJS)) $(if $(filter $(SSH_APP_NAMES),$(notdir $(1))),$(SSH_LIB_OBJS)))
@@ -77,6 +77,8 @@ WOLFSSH_SOURCE ?=
 WOLFSSL_SOURCE ?=
 NETWORK_PHASE_B_TEST_BIN := $(BUILD_DIR)/network-phase-b/platform_test
 NETWORK_PHASE_B_TEST_SRCS := tests/network_phase_b/test_platform.c tests/network_phase_b/deterministic_platform.c $(LIB_DIR)/net/time.c
+NETWORK_PHASE_C_ABI_TEST_BIN := $(BUILD_DIR)/network-phase-c/raw_abi_test
+NETWORK_PHASE_C_ABI_TEST_SRC := tests/network_phase_c/test_raw_abi.c
 
 TARGET_CFLAGS := -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -I$(LIB_DIR)
 LIB_CFLAGS := $(TARGET_CFLAGS) -std=gnu11
@@ -90,7 +92,7 @@ ELF2BIN_MAX_SECTIONS ?= 4096
 ELF2BIN_MAX_RELOCATIONS ?= 32768
 QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
 
-.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network-host network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe
+.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe
 
 all: check-layout $(OS_IMG)
 
@@ -109,7 +111,7 @@ $(ELF2BIN_TOOL): tools/elf2bin.c Makefile | $(BUILD_DIR)
 $(CHECK_TOOL): $(CHECK_SOURCES) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) tools/check_image.c -o $(CHECK_TOOL)
 
-$(LAYOUT_TOOL): tools/check_layout.c $(PLATFORM_LAYOUT_DEF) Makefile | $(BUILD_DIR)
+$(LAYOUT_TOOL): tools/check_layout.c $(PLATFORM_LAYOUT_DEF) $(LIB_DIR)/net/raw.def Makefile | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) tools/check_layout.c -o $(LAYOUT_TOOL)
 
 check-layout: $(LAYOUT_TOOL)
@@ -232,7 +234,21 @@ $(NETWORK_PHASE_B_TEST_BIN): $(NETWORK_PHASE_B_TEST_SRCS) $(LIB_DIR)/net/net_pla
 test-network-host: $(NETWORK_PHASE_B_TEST_BIN)
 	$(NETWORK_PHASE_B_TEST_BIN)
 
-test: test-network-host test-build test-e2e
+$(NETWORK_PHASE_C_ABI_TEST_BIN): $(NETWORK_PHASE_C_ABI_TEST_SRC) $(LIB_DIR)/net/raw.h $(LIB_DIR)/net/raw.def $(LIB_DIR)/syscall.def Makefile | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_CFLAGS) -std=c90 -pedantic-errors -I$(LIB_DIR) $(NETWORK_PHASE_C_ABI_TEST_SRC) -o $@
+
+test-network-abi: $(NETWORK_PHASE_C_ABI_TEST_BIN)
+	$(NETWORK_PHASE_C_ABI_TEST_BIN)
+
+test-network-driver: $(OS_IMG) $(CHECK_TOOL)
+	$(PYTHON) tests/network_phase_c.py --image $(OS_IMG)
+
+test-network-qemu: test-network-driver test-e2e
+
+test-network: test-network-host test-network-abi test-network-qemu
+
+test: test-network test-build
 
 run: $(OS_IMG)
 	$(QEMU) -m $(QEMU_MEMORY) -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk

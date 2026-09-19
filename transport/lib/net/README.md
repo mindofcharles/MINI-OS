@@ -6,4 +6,6 @@ Public headers added here must remain usable by applications compiled under stri
 
 The current platform layer supplies `net_platform.h`, wrap-safe relative-time helpers, production monotonic/random adapters, and the nonblocking cancellation callback adapter.
 
-Protocol implementation begins after the raw-frame driver exists.
+The implemented raw transport supplies `raw.h`, shared `raw.def` layout constants, and modern-C wrappers for the three polling NE2000 frame syscalls.
+
+Protocol parsing remains deferred and must build above the normalized raw-frame boundary without importing hardware registers or packet-memory addresses.

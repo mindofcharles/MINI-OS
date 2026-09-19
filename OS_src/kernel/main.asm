@@ -39,6 +39,10 @@ KBD_DATA_PORT       equ 0x60
 %include "transport/lib/syscall.def"
 %undef SYSCALL_CONST
 
+%define NET_RAW_CONST(name, value) name equ value
+%include "transport/lib/net/raw.def"
+%undef NET_RAW_CONST
+
 FS_OK                equ 0
 FS_ERR_NOT_FOUND     equ -1
 FS_ERR_EXISTS        equ -2
@@ -223,6 +227,7 @@ kernel_start:
 .interrupts_ready:
     sti
     nop
+    call ne2k_initialize
     call fs_bootstrap
     cmp eax, FS_OK
     je .fs_ready
@@ -280,6 +285,7 @@ kernel_interrupt_halt:
 %include "OS_src/kernel/timer.asm"
 %include "OS_src/kernel/random.asm"
 %include "OS_src/kernel/interrupts.asm"
+%include "OS_src/kernel/net.asm"
 %include "OS_src/kernel/idt.asm"
 %include "OS_src/kernel/shell.asm"
 %include "OS_src/kernel/fs.asm"

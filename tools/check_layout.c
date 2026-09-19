@@ -5,6 +5,10 @@
 #include "../OS_src/kernel/platform_layout.def"
 #undef PLATFORM_LAYOUT_CONST
 
+#define NET_RAW_CONST(name, value) enum { name = value };
+#include "../transport/lib/net/raw.def"
+#undef NET_RAW_CONST
+
 typedef struct {
     const char *name;
     uint32_t begin;
@@ -240,7 +244,8 @@ int main(void) {
         fprintf(stderr, "layout: application argument fields overlap\n");
         return 1;
     }
-    if (NET_FRAME_BUFFER_SIZE < 1514U || MEMORY_CANARY_VALUE == 0U ||
+    if (NET_FRAME_BUFFER_SIZE < NET_FRAME_MAX + 1U ||
+        MEMORY_CANARY_VALUE == 0U ||
         MEMORY_CANARY_VALUE > 0xFFU) {
         fprintf(stderr, "layout: a frame buffer or canary constant is invalid\n");
         return 1;

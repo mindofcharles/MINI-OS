@@ -155,6 +155,41 @@ def make_source_newer(path: Path) -> None:
     os.utime(path, None)
 
 
+def reject_invalid_raw_frame_layout(repo: Path) -> None:
+    definition = repo / "transport/lib/net/raw.def"
+    layout_tool = repo / "build/check_layout"
+    original_stat = definition.stat()
+    original = definition.read_text(encoding="ascii")
+    frame_limit = "NET_RAW_CONST(NET_FRAME_MAX, 1514)"
+
+    if original.count(frame_limit) != 1:
+        raise RuntimeError("raw-frame maximum definition is unexpected")
+    try:
+        definition.write_text(
+            original.replace(
+                frame_limit,
+                "NET_RAW_CONST(NET_FRAME_MAX, 4096)",
+            ),
+            encoding="ascii",
+        )
+        make_source_newer(definition)
+        rejected = run(["make", "check-layout"], repo, expect_success=False)
+        if "a frame buffer or canary constant is invalid" not in (
+            rejected.stdout + rejected.stderr
+        ):
+            raise RuntimeError(
+                "insufficient raw-frame alignment space failed unexpectedly"
+            )
+    finally:
+        definition.write_text(original, encoding="ascii")
+        layout_tool.unlink(missing_ok=True)
+        run(["make", "check-layout"], repo)
+        os.utime(
+            definition,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+
+
 def assert_changed(before: dict[Path, int], paths: list[Path], label: str) -> None:
     unchanged = [str(path) for path in paths if timestamp(path) == before[path]]
     if unchanged:
@@ -188,6 +223,8 @@ def expect_checker_failure(repo: Path, image: Path) -> None:
 
 def verify_kernel_entry_stub(repo: Path) -> None:
     kernel = (repo / "build/kernel.bin").read_bytes()
+    if b"MINI_OS_PHASE_C_FAULT_INJECTION_ONLY" in kernel:
+        raise RuntimeError("Phase C test-only fault hooks entered the normal kernel")
     if len(kernel) >= 5 and kernel[0] == 0xE9:
         instruction_size = 5
         displacement = struct.unpack_from("<i", kernel, 1)[0]
@@ -1041,13 +1078,17 @@ def verify_per_application_libraries(repo: Path) -> None:
 
     hello_binary = repo / "transport/build/apps/hello.bin"
     hello_object = repo / "build/transport/apps/hello.o"
+    compiler_runtime = repo / "build/compiler_rt.o"
     hello_binary.unlink()
     hello_object.unlink()
+    compiler_runtime.unlink(missing_ok=True)
+    for network_object in (repo / "build/transport/lib/net").glob("*.o"):
+        network_object.unlink()
     hello = run(["make", "transport/build/apps/hello.bin"], repo)
     hello_output = hello.stdout + hello.stderr
     if "compiler_rt.c" in hello_output or "dependency_probe.c" in hello_output:
         raise RuntimeError("ordinary application acquired network-only objects")
-    if (repo / "build/compiler_rt.o").exists():
+    if compiler_runtime.exists():
         raise RuntimeError("ordinary application built the network compiler runtime")
 
     ping = run(["make", "app", "APP=ping.c"], repo)
@@ -1094,6 +1135,7 @@ def main() -> int:
 
         run(["make", "network-phase0-check"], repo)
         reject_invalid_platform_layout(repo)
+        reject_invalid_raw_frame_layout(repo)
         run(["make", "clean"], repo)
         clean_build = run(["make"], repo)
         output = clean_build.stdout + clean_build.stderr
@@ -1105,6 +1147,7 @@ def main() -> int:
         verify_kernel_entry_stub(repo)
         run(["build/check_image", "build/mini_os.img"], repo)
         verify_phase_b_platform(repo)
+        run(["make", "test-network-abi"], repo)
         reject_corrupt_images(repo)
         reject_reserved_injector_names(repo)
         reject_unsafe_injector_targets(repo)

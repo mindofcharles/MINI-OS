@@ -85,6 +85,10 @@ idt_set_gate:
 ; Numbers, open flags, and negative errors come from transport/lib/syscall.def.
 syscall_entry:
     pushad
+    ; String and port-string operations in trusted syscall implementations
+    ; always run forward. IRET restores the caller's saved EFLAGS, including
+    ; its original DF, on ordinary returns.
+    cld
 
     cmp eax, SYS_NR_EXIT
     je near .sys_exit
@@ -125,6 +129,12 @@ syscall_entry:
     je near .sys_kbd_poll_key
     cmp eax, SYS_NR_GET_RANDOM
     je near .sys_get_random
+    cmp eax, SYS_NR_NET_GET_INFO
+    je near .sys_net_get_info
+    cmp eax, SYS_NR_NET_SEND_FRAME
+    je near .sys_net_send_frame
+    cmp eax, SYS_NR_NET_RECV_FRAME
+    je near .sys_net_recv_frame
 
     mov eax, SYS_ERR_INVALID
     jmp .syscall_return
@@ -290,6 +300,21 @@ syscall_entry:
     jmp .syscall_return
 .sys_get_random_unavailable:
     mov eax, SYS_ERR_UNAVAILABLE
+    jmp .syscall_return
+
+.sys_net_get_info:
+    mov edi, ebx
+    call ne2k_get_info
+    jmp .syscall_return
+
+.sys_net_send_frame:
+    mov esi, ebx
+    call ne2k_send_frame
+    jmp .syscall_return
+
+.sys_net_recv_frame:
+    mov edi, ebx
+    call ne2k_recv_frame
     jmp .syscall_return
 
 .sys_write:

@@ -31,8 +31,8 @@ After loading the kernel, the boot sector enables A20, saves and modifies the by
 - `0x00008000..0x00014800` is the 100-sector kernel image reservation.
 - `0x00020000..0x00026000` contains six independent 4 KiB kernel work buffers.
 - `0x00026000..0x00026800` is the complete 256-entry IDT.
-- `0x00027000..0x00028000` is the reserved receive-frame buffer.
-- `0x00028000..0x00029000` is the reserved transmit-frame buffer.
+- `0x00027000..0x00028000` is the reserved receive-frame buffer, including private space for word-wide Remote DMA alignment.
+- `0x00028000..0x00029000` is the reserved transmit-frame buffer, including private space for word-wide Remote DMA alignment.
 - `0x0007F000..0x00080000` is the kernel-stack canary.
 - `0x00080000..0x00090000` is the 64 KiB downward-growing kernel stack.
 - `0x00090000..0x00091000` is the interrupt-stack canary.
@@ -74,7 +74,7 @@ The kernel verifies all four canaries after application exit and again before ev
 
 `tools/check_layout.c` rejects empty, reversed, misaligned, inconsistent, overlapping, or out-of-contract ranges before the kernel or image is built.
 
-It also checks the BIOS boot address, boot-stack adjacency, kernel sector-counter limit, IDT size, A20 scratch addresses, firmware-visible low and high endpoints, argument containment, frame-buffer capacity, and canary adjacency.
+It also checks the BIOS boot address, boot-stack adjacency, kernel sector-counter limit, IDT size, A20 scratch addresses, firmware-visible low and high endpoints, argument containment, the shared maximum raw-frame size plus its private alignment byte, and canary adjacency.
 
 The boot assembly independently rejects an unrepresentable memory requirement, an oversized direct kernel-sector count, or an invalid A20 test layout at assembly time.
 

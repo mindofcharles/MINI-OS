@@ -25,7 +25,8 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - checked ATA PIO disk I/O (`LBA28`, primary-channel master sector read/write) with boot-image identity verification before mount
 - Custom filesystem with persistent directory tree and fail-stop detection of interrupted mutations
 - Complete IDT with fatal exception diagnostics, remapped 8259 IRQs, a dedicated interrupt stack, and PIT IRQ0 monotonic timekeeping
-- `int 0x80` System Call Engine for console, heap, file, cursor, monotonic-clock, nonblocking-key, and RDRAND-backed secure-random services
+- Polling NE2000 raw Ethernet transport with bounded Remote DMA, transmit, receive-ring, overrun, reset, and unavailable-device paths
+- `int 0x80` System Call Engine for console, heap, file, cursor, monotonic-clock, nonblocking-key, RDRAND-backed secure-random, and raw-frame services
 - FAT-chain executable loader (`run <file>`) for flat binaries up to 512 KiB at `0x00100000`
 - Modern-C runtime implementation with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
 - Tested API subset exposed through `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, and `<assert.h>`
@@ -39,7 +40,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`, `check_layout.c`)
 - `transport/`: host files injected into `/transport/` on disk image
   - `transport/lib/`: modern-C runtime and compiler helpers, network/SSH implementation directories, `crt0.asm`, and C90-compatible public headers
-  - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
+  - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`, `netdiag.c`)
   - `transport/lib_test/`: strict C90 executable tests, including BSS coverage
   - `transport/build/`: compiled flat output binaries (`apps/*.bin`, `lib_test/*.bin`)
 - `docs/`: project documentation
@@ -122,6 +123,7 @@ The generated image is exactly 4,471 sectors (2,289,152 bytes).
 - Filesystem (current implementation): `docs/Filesystem_Current.md`
 - Filesystem design draft: `docs/DIY-FS.md`
 - Complete system call ABI: `docs/Syscall_ABI.md`
+- Raw Ethernet transport: `docs/Network_Raw_Transport.md`
 - Runtime support matrix: `docs/Library_Support.md`
 - Automated testing: `docs/Testing.md`
 - Real hardware boot guide: `docs/Real_Hardware_Guide.md`
