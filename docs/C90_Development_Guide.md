@@ -214,7 +214,7 @@ sequenceDiagram
 
     Shell->>Loader: Command "run hello.bin"
     Loader->>Loader: Validate size and complete FAT chain
-    Loader->>Loader: Clear 512 KiB image, heap, arguments, and stack; install canaries
+    Loader->>Loader: Clear 512 KiB image, heap, arguments, and stack, then install canaries
     Loader->>Loader: Follow FAT blocks into 0x00100000 and clear final-sector padding
     Loader->>Loader: Save Shell ESP -> [saved_kernel_esp]
     Loader->>Loader: Set ESP = 0x001CB000

@@ -7,6 +7,7 @@ make check-layout
 make check-image
 make network-phase0-check
 make test-network-host
+make test-network-d1
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -18,7 +19,9 @@ make test
 
 `make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs the host network, raw ABI, build-policy, deterministic NE2000, and general QEMU end-to-end regressions.
 
-`make test-network-host` builds and runs the separate deterministic clock, random, wrap, delayed-poll, and cancellation regression without linking the production syscall adapter.
+`make test-network-host` compiles the application-level network header under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, and receive-queue regressions without linking the production syscall adapter.
+
+`make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the deterministic Phase D backend regression.
 
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 
@@ -100,10 +103,10 @@ It boots and asserts:
 - dependency and boundary proof that the layout checker reserves a private alignment byte beyond the shared maximum raw-frame length;
 - a binary-level assertion that the kernel image starts with an executable jump whose destination lies inside the image;
 - GNU C11 compilation of `transport/lib` and strict C90 flags for apps/tests;
-- strict-C90 parsing of the platform and network-platform public headers;
+- strict-C90 parsing of the platform, network-platform, raw-frame, and application-level network public headers;
 - exact size and field-offset agreement for the versioned raw-network information structure;
-- deterministic host checks for wrapping elapsed time, maximum duration, delayed polling, callback cancellation, and advancing fake random state;
-- binary proof that the deterministic platform marker exists in its test executable but is absent from the production image;
+- deterministic host checks for wrapping elapsed time, maximum duration, delayed polling, callback cancellation, fake random state, device information, copied transmission, queued reception, and injected transport errors;
+- binary proof that the deterministic platform and packet-backend markers exist only in their test executables and are absent from the production image;
 - symbol inspection proving that the deterministic wait test does not import `getchar` or `kbd_poll_key`;
 - rejection of a generated C99-only application probe;
 - rejection of an unfinished mutation, cyclic FAT, impossible file sizes, and reserved directory names by the image checker;
@@ -120,7 +123,8 @@ It boots and asserts:
 - acceptance and real QEMU execution of exact 512 KiB application images produced independently by `ld.lld` and `elf2bin`;
 - QEMU execution of a BSS probe after its final on-disk block padding is deliberately filled with nonzero bytes;
 - rejection of 512 KiB plus one byte, overflowing BSS placement, and unresolved-strong-symbol layouts;
-- proof that ordinary applications acquire no network objects, network applications acquire the modern-C network objects and compiler helpers, and only the SSH application acquires SSH objects;
+- rejection of missing, duplicate, or nonexistent network source-group assignments;
+- proof that ordinary applications acquire no network objects, raw network applications acquire only the base group, IPv4 applications acquire the separately selected modern-C protocol group and compiler helpers under both linkers, the fixed network context remains within a bounded BSS allocation, and only the SSH application acquires SSH objects;
 - a no-op incremental build;
 - runtime-header and kernel-include dependency rebuilding;
 - a clean build with `ld.lld` unavailable, forcing `elf2bin`;

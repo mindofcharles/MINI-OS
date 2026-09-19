@@ -1,11 +1,17 @@
 # Network Library Boundary
 
-Sources added to this directory are compiled with the modern-C library flags and are linked only into `ping`, `netcat`, and `ssh` applications.
+Network-library implementations compile as modern C with fatal project warnings, while application-facing headers remain compatible with strict C90.
 
-Public headers added here must remain usable by applications compiled under strict C90.
+The base object group contains `raw.c`, `platform.c`, and `time.c` and is linked into raw-frame consumers such as `netdiag` and `test_network` as well as higher-level network applications.
 
-The current platform layer supplies `net_platform.h`, wrap-safe relative-time helpers, production monotonic/random adapters, and the nonblocking cancellation callback adapter.
+The IPv4 object group is separate and is linked only into `ping`, `netcat`, and `ssh`, so raw diagnostics do not acquire application-protocol state or code.
 
-The implemented raw transport supplies `raw.h`, shared `raw.def` layout constants, and modern-C wrappers for the three polling NE2000 frame syscalls.
+The build rejects a network source that is missing from both groups, appears in both groups, or is named by a group but absent from the source tree.
 
-Protocol parsing remains deferred and must build above the normalized raw-frame boundary without importing hardware registers or packet-memory addresses.
+`net.h` defines the stable C90 application contract and library-level errors for Ethernet, ARP, static IPv4, and ICMP Echo, while `internal.h` owns modern-C integer-width checks and fixed application-state structures.
+
+The platform layer supplies `net_platform.h`, wrap-safe relative-time helpers, production monotonic and random adapters, and the nonblocking cancellation callback adapter.
+
+The raw transport supplies `raw.h`, shared `raw.def` layout constants, and modern-C wrappers for the three polling NE2000 frame syscalls.
+
+Stage D1 provides the public boundary, fixed state, and deterministic backend; Ethernet, ARP, IPv4, and ICMP packet processing is not implemented yet.

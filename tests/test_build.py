@@ -238,16 +238,23 @@ def verify_kernel_entry_stub(repo: Path) -> None:
         raise RuntimeError("kernel entry stub jumps outside the kernel image")
 
 
-def verify_phase_b_platform(repo: Path) -> None:
-    marker = b"MINI_OS_PHASE_B_DETERMINISTIC_PLATFORM_ONLY"
+def verify_deterministic_network_backends(repo: Path) -> None:
+    phase_b_marker = b"MINI_OS_PHASE_B_DETERMINISTIC_PLATFORM_ONLY"
+    phase_d_marker = b"MINI_OS_PHASE_D_DETERMINISTIC_BACKEND_ONLY"
     run(["make", "test-network-host"], repo)
-    test_binary = repo / "build/network-phase-b/platform_test"
-    if marker not in test_binary.read_bytes():
+    phase_b_binary = repo / "build/network-phase-b/platform_test"
+    phase_d_binary = repo / "build/network-phase-d/backend_test"
+    production_image = (repo / "build/mini_os.img").read_bytes()
+    if phase_b_marker not in phase_b_binary.read_bytes():
         raise RuntimeError("deterministic platform binary has no test-only marker")
-    if marker in (repo / "build/mini_os.img").read_bytes():
+    if phase_d_marker not in phase_d_binary.read_bytes():
+        raise RuntimeError("deterministic packet backend has no test-only marker")
+    if phase_b_marker in production_image:
         raise RuntimeError("deterministic platform marker entered production image")
+    if phase_d_marker in production_image:
+        raise RuntimeError("deterministic packet backend entered production image")
 
-    symbols = run(["nm", "-u", str(test_binary)], repo).stdout
+    symbols = run(["nm", "-u", str(phase_b_binary)], repo).stdout
     if "getchar" in symbols or "kbd_poll_key" in symbols:
         raise RuntimeError("deterministic wait test acquired a blocking/input syscall")
 
@@ -1052,6 +1059,40 @@ def verify_per_application_libraries(repo: Path) -> None:
 
     net_directory.mkdir(exist_ok=True)
     ssh_directory.mkdir(exist_ok=True)
+
+    hello_binary = repo / "transport/build/apps/hello.bin"
+    hello_object = repo / "build/transport/apps/hello.o"
+    netdiag_binary = repo / "transport/build/apps/netdiag.bin"
+    netdiag_object = repo / "build/transport/apps/netdiag.o"
+    ping_binary = repo / "transport/build/apps/ping.bin"
+    ping_object = repo / "build/transport/apps/ping.o"
+    compiler_runtime = repo / "build/compiler_rt.o"
+    hello_binary.unlink()
+    hello_object.unlink()
+    compiler_runtime.unlink(missing_ok=True)
+    for network_object in (repo / "build/transport/lib/net").glob("*.o"):
+        network_object.unlink()
+    hello = run(["make", "transport/build/apps/hello.bin"], repo)
+    hello_output = hello.stdout + hello.stderr
+    if "compiler_rt.c" in hello_output or "transport/lib/net/" in hello_output:
+        raise RuntimeError("ordinary application acquired network-only objects")
+    if compiler_runtime.exists() or any(
+        (repo / "build/transport/lib/net").glob("*.o")
+    ):
+        raise RuntimeError("ordinary application built network-only support")
+
+    netdiag_binary.unlink(missing_ok=True)
+    netdiag_object.unlink(missing_ok=True)
+    netdiag = run(["make", "app", "APP=netdiag.c"], repo)
+    netdiag_output = netdiag.stdout + netdiag.stderr
+    if (
+        "dependency_probe.c" in netdiag_output
+        or "transport/lib/net/net.c" in netdiag_output
+        or (repo / "build/transport/lib/net/dependency_probe.o").exists()
+        or (repo / "build/transport/lib/net/net.o").exists()
+    ):
+        raise RuntimeError("raw network application acquired IPv4 objects")
+
     net_source.write_text(
         "unsigned int net_dependency_probe(void)\n{\n"
         "    volatile unsigned long long value = 0x100000002ULL;\n"
@@ -1059,6 +1100,41 @@ def verify_per_application_libraries(repo: Path) -> None:
         "    return (unsigned int)(value / divisor);\n}\n",
         encoding="ascii",
     )
+    ungrouped = run(["make", "-n", "app", "APP=netdiag.c"], repo,
+                    expect_success=False)
+    if "network library sources have no object group" not in (
+        ungrouped.stdout + ungrouped.stderr
+    ):
+        raise RuntimeError("build did not reject an ungrouped network source")
+
+    duplicate_override = (
+        "NET_IPV4_LIB_SRCS=transport/lib/net/net.c "
+        "transport/lib/net/raw.c transport/lib/net/dependency_probe.c"
+    )
+    duplicate = run(
+        ["make", "-n", duplicate_override, "app", "APP=netdiag.c"],
+        repo,
+        expect_success=False,
+    )
+    if "network library sources assigned to multiple groups" not in (
+        duplicate.stdout + duplicate.stderr
+    ):
+        raise RuntimeError("build did not reject duplicate network grouping")
+
+    missing_override = (
+        "NET_IPV4_LIB_SRCS=transport/lib/net/net.c "
+        "transport/lib/net/dependency_probe.c transport/lib/net/missing_probe.c"
+    )
+    missing = run(
+        ["make", "-n", missing_override, "app", "APP=netdiag.c"],
+        repo,
+        expect_success=False,
+    )
+    if "grouped network library sources do not exist" not in (
+        missing.stdout + missing.stderr
+    ):
+        raise RuntimeError("build did not reject a nonexistent grouped source")
+
     ssh_source.write_text(
         "int ssh_dependency_probe(void)\n{\n    return 7;\n}\n",
         encoding="ascii",
@@ -1076,33 +1152,78 @@ def verify_per_application_libraries(repo: Path) -> None:
         encoding="ascii",
     )
 
-    hello_binary = repo / "transport/build/apps/hello.bin"
-    hello_object = repo / "build/transport/apps/hello.o"
-    compiler_runtime = repo / "build/compiler_rt.o"
-    hello_binary.unlink()
-    hello_object.unlink()
-    compiler_runtime.unlink(missing_ok=True)
-    for network_object in (repo / "build/transport/lib/net").glob("*.o"):
-        network_object.unlink()
-    hello = run(["make", "transport/build/apps/hello.bin"], repo)
-    hello_output = hello.stdout + hello.stderr
-    if "compiler_rt.c" in hello_output or "dependency_probe.c" in hello_output:
-        raise RuntimeError("ordinary application acquired network-only objects")
-    if compiler_runtime.exists():
-        raise RuntimeError("ordinary application built the network compiler runtime")
-
-    ping = run(["make", "app", "APP=ping.c"], repo)
+    protocol_override = (
+        "NET_IPV4_LIB_SRCS=transport/lib/net/net.c "
+        "transport/lib/net/dependency_probe.c"
+    )
+    ping = run(["make", protocol_override, "app", "APP=ping.c"], repo)
     ping_output = ping.stdout + ping.stderr
-    if "-std=gnu11" not in ping_output or "-std=c90" not in ping_output:
+    ping_lines = ping_output.splitlines()
+    library_compile = next(
+        (
+            line
+            for line in ping_lines
+            if " -c " in line and "dependency_probe.c" in line
+        ),
+        "",
+    )
+    application_compile = next(
+        (
+            line
+            for line in ping_lines
+            if " -c " in line and "transport/apps/ping.c" in line
+        ),
+        "",
+    )
+    if (
+        "-std=gnu11" not in library_compile
+        or "-std=c90" not in application_compile
+    ):
         raise RuntimeError("network library and application language policies diverged")
+    if not all(
+        flag in library_compile for flag in ("-Wall", "-Wextra", "-Werror")
+    ):
+        raise RuntimeError("network library warnings are not fatal")
+    if "-pedantic-errors" not in application_compile:
+        raise RuntimeError("network application is not strict C90")
     if not (repo / "build/compiler_rt.o").is_file() or not (
         repo / "build/transport/lib/net/dependency_probe.o"
     ).is_file():
         raise RuntimeError(
             "network application did not acquire its private objects\n" + ping_output
         )
+    if not (repo / "build/transport/lib/net/net.o").is_file():
+        raise RuntimeError("IPv4 application did not acquire its context object")
+    context_symbols = run(
+        ["nm", "-S", "build/transport/lib/net/net.o"], repo
+    ).stdout
+    context_match = re.search(
+        r"^[0-9A-Fa-f]+\s+([0-9A-Fa-f]+)\s+[Bb]\s+net_global_context$",
+        context_symbols,
+        re.MULTILINE,
+    )
+    if context_match is None:
+        raise RuntimeError("network context is not stored in BSS")
+    context_size = int(context_match.group(1), 16)
+    if context_size < 2 * 1514 or context_size > 4096:
+        raise RuntimeError("network context has an unexpected memory footprint")
     if (repo / "build/transport/lib/ssh/dependency_probe.o").exists():
         raise RuntimeError("non-SSH network application acquired SSH objects")
+
+    ping_binary.unlink()
+    ping_object.unlink()
+    fallback_ping = run(
+        [
+            "make",
+            "LLD=__missing_ld_lld__",
+            protocol_override,
+            "app",
+            "APP=ping.c",
+        ],
+        repo,
+    )
+    if "with elf2bin" not in fallback_ping.stdout + fallback_ping.stderr:
+        raise RuntimeError("IPv4 application fallback did not use elf2bin")
 
     platform_object = repo / "build/transport/lib/net/platform.o"
     time_object = repo / "build/transport/lib/net/time.o"
@@ -1112,7 +1233,7 @@ def verify_per_application_libraries(repo: Path) -> None:
     if "kbd_poll_key" not in platform_symbols or "getchar" in platform_symbols:
         raise RuntimeError("production cancellation adapter is not nonblocking")
 
-    run(["make", "app", "APP=ssh.c"], repo)
+    run(["make", protocol_override, "app", "APP=ssh.c"], repo)
     if not (repo / "build/transport/lib/ssh/dependency_probe.o").is_file():
         raise RuntimeError("SSH application did not acquire its private objects")
 
@@ -1146,7 +1267,7 @@ def main() -> int:
         run(["build/check_layout"], repo)
         verify_kernel_entry_stub(repo)
         run(["build/check_image", "build/mini_os.img"], repo)
-        verify_phase_b_platform(repo)
+        verify_deterministic_network_backends(repo)
         run(["make", "test-network-abi"], repo)
         reject_corrupt_images(repo)
         reject_reserved_injector_names(repo)

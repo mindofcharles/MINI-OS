@@ -95,13 +95,13 @@ make network-phase0 \
 
 The pinned revisions, probe configuration, generated outputs, and host-probe procedure are documented with the reproducible tooling in [`tools/network_phase0/README.md`](../tools/network_phase0/README.md).
 
-The deterministic platform regression runs entirely on the host and does not require external sources:
+The deterministic network regressions run entirely on the host and do not require external sources:
 
 ```bash
 make test-network-host
 ```
 
-This target creates `build/network-phase-b/platform_test` by substituting a test-only clock, random source, and cancellation callback for the production syscall adapter. Its marker is checked for absence from `build/mini_os.img` by the build regression.
+This target creates `build/network-phase-b/platform_test`, compiles the application-level network header under strict C90, and creates `build/network-phase-d/backend_test` with a test-only raw device, frame queues, clock, random source, and cancellation control. Both test-only markers are checked for absence from `build/mini_os.img` by the build regression.
 
 ## 4. Run in QEMU
 
@@ -161,7 +161,7 @@ The kernel target depends on every assembly/layout include below `OS_src/kernel/
 
 The layout checker, runtime, and application targets also depend on the raw-frame definition where applicable, while runtime and application targets depend on all public runtime headers and `syscall.def`.
 
-Ordinary applications link only `crt0` and `minilibc`, the named network applications `netdiag`, `ping`, `netcat`, and `ssh` plus the raw-network executable test additionally link the modern-C network objects and compiler runtime, and only `ssh` links the modern-C SSH objects.
+Ordinary applications link only `crt0` and `minilibc`; `netdiag` and the raw-network executable test add the modern-C raw, platform, and time objects plus compiler helpers; `ping`, `netcat`, and `ssh` additionally add the IPv4 protocol group; and only `ssh` adds the modern-C SSH objects.
 
 The Makefile itself is also an input to generated tools, objects, binaries, and the final image, so flag or recipe changes trigger the required rebuild.
 
