@@ -30,7 +30,7 @@ Build outputs:
 - `build/check_image`
 - `build/check_layout`
 - `build/mini_os.img`
-- `build/transport/apps/*.o`
+- `build/transport/apps/`: application object tree
 - `build/transport/lib_test/*.o`
 - `transport/build/apps/*.bin`
 - `transport/build/lib_test/*.bin`
@@ -76,6 +76,8 @@ To build one application:
 ```bash
 make app APP=hello.c
 ```
+
+Multi-source applications use their directory name, for example `make app APP=rawchat`.
 
 Objects retain their source path below `build/transport/`, so an application and a library test may safely share a basename.
 
@@ -161,7 +163,9 @@ The kernel target depends on every assembly/layout include below `OS_src/kernel/
 
 The layout checker, runtime, and application targets also depend on the raw-frame definition where applicable, while runtime and application targets depend on all public runtime headers and `syscall.def`.
 
-Ordinary applications link only `crt0` and `minilibc`; `netdiag` and the raw-network executable test add the modern-C raw, platform, and time objects plus compiler helpers; `ping`, `netcat`, and `ssh` additionally add the IPv4 protocol group; and only `ssh` adds the modern-C SSH objects.
+Ordinary applications link only `crt0` and `minilibc`; `netdiag`, Raw Chat, and the raw-network executable test add the modern-C raw, platform, and time objects plus compiler helpers; `ping`, `netcat`, and `ssh` additionally add the IPv4 protocol group; and only `ssh` adds the modern-C SSH objects.
+
+Raw Chat's private `main.c` and `protocol.c` both remain strict C90 and link only into `rawchat.bin`.
 
 The Makefile itself is also an input to generated tools, objects, binaries, and the final image, so flag or recipe changes trigger the required rebuild.
 

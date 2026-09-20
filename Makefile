@@ -31,6 +31,7 @@ CHECK_SOURCES := tools/check_image.c tools/check_image.h
 
 LIB_DIR := transport/lib
 APPS_DIR := transport/apps
+APP_TEST_DIR := transport/apps_test
 LIB_TEST_DIR := transport/lib_test
 APP_BUILD_DIR := transport/build
 APP_OBJ_DIR := $(BUILD_DIR)/transport
@@ -67,7 +68,7 @@ SSH_LIB_SRCS := $(shell find $(LIB_DIR)/ssh -type f -name '*.c' 2>/dev/null | so
 NET_BASE_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_BASE_LIB_SRCS))
 NET_IPV4_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_IPV4_LIB_SRCS))
 SSH_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(SSH_LIB_SRCS))
-NETWORK_BASE_APP_NAMES := netdiag ping netcat ssh test_network
+NETWORK_BASE_APP_NAMES := netdiag rawchat ping netcat ssh test_network
 NETWORK_IPV4_APP_NAMES := ping netcat ssh
 SSH_APP_NAMES := ssh
 
@@ -77,8 +78,15 @@ ifneq ($(strip $(NET_BASE_LIB_OBJS) $(NET_IPV4_LIB_OBJS) $(SSH_LIB_OBJS)),)
 .SECONDARY: $(NET_BASE_LIB_OBJS) $(NET_IPV4_LIB_OBJS) $(SSH_LIB_OBJS)
 endif
 
-APP_SRCS := $(shell find $(APPS_DIR) $(LIB_TEST_DIR) -name '*.c' 2>/dev/null | sort)
-APP_BINS := $(patsubst transport/%.c,$(APP_BUILD_DIR)/%.bin,$(APP_SRCS))
+RAWCHAT_APP_DIR := $(APPS_DIR)/rawchat
+RAWCHAT_APP_SRCS := $(addprefix $(RAWCHAT_APP_DIR)/,main.c protocol.c)
+RAWCHAT_APP_HEADERS := $(RAWCHAT_APP_DIR)/protocol.h
+RAWCHAT_APP_OBJS := $(patsubst $(RAWCHAT_APP_DIR)/%.c,$(APP_OBJ_DIR)/apps/rawchat/%.o,$(RAWCHAT_APP_SRCS))
+RAWCHAT_APP_BIN := $(APP_BUILD_DIR)/apps/rawchat.bin
+SINGLE_FILE_APP_SRCS := $(sort $(wildcard $(APPS_DIR)/*.c))
+LIB_TEST_SRCS := $(shell find $(LIB_TEST_DIR) -name '*.c' 2>/dev/null | sort)
+APP_SRCS := $(SINGLE_FILE_APP_SRCS) $(LIB_TEST_SRCS)
+APP_BINS := $(patsubst transport/%.c,$(APP_BUILD_DIR)/%.bin,$(APP_SRCS)) $(RAWCHAT_APP_BIN)
 
 NASM := nasm -w-label-redef-late
 
@@ -102,6 +110,8 @@ NETWORK_PHASE_C_ABI_TEST_SRC := tests/network_phase_c/test_raw_abi.c
 NETWORK_PHASE_D_PUBLIC_HEADER_OBJ := $(BUILD_DIR)/network-phase-d/public_header.o
 NETWORK_PHASE_D_BACKEND_TEST_BIN := $(BUILD_DIR)/network-phase-d/backend_test
 NETWORK_PHASE_D_BACKEND_TEST_SRCS := tests/network_phase_d/test_backend.c tests/network_phase_d/deterministic_backend.c
+RAWCHAT_PROTOCOL_TEST_BIN := $(BUILD_DIR)/transport/apps_test/rawchat/test_protocol
+RAWCHAT_PROTOCOL_TEST_SRCS := $(APP_TEST_DIR)/rawchat/test_protocol.c $(RAWCHAT_APP_DIR)/protocol.c
 
 TARGET_CFLAGS := -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -I$(LIB_DIR)
 LIB_CFLAGS := $(TARGET_CFLAGS) -std=gnu11
@@ -109,14 +119,17 @@ NET_LIB_CFLAGS := $(LIB_CFLAGS) -Wall -Wextra -Werror
 APP_CFLAGS := $(TARGET_CFLAGS) -std=c90 -pedantic-errors -Wall -Wextra -Werror
 HOST_SYSROOT := $(shell if [ "$$(uname -s)" = Darwin ]; then xcrun --sdk macosx --show-sdk-path 2>/dev/null; fi)
 HOST_CFLAGS := -O2 -std=c11 -Wall -Wextra -Werror $(if $(HOST_SYSROOT),-isysroot $(HOST_SYSROOT))
+HOST_C90_CFLAGS := $(filter-out -std=c11,$(HOST_CFLAGS)) -std=c90 -pedantic-errors
 HOST_ENV := $(if $(HOST_SYSROOT),SDKROOT=$(HOST_SYSROOT))
 ELF2BIN_MAX_OBJECTS ?= 256
 ELF2BIN_MAX_SYMBOLS ?= 4096
 ELF2BIN_MAX_SECTIONS ?= 4096
 ELF2BIN_MAX_RELOCATIONS ?= 32768
 QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
+RAWCHAT_HOST ?= 127.0.0.1
+RAWCHAT_PORT ?= 12345
 
-.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe
+.PHONY: all clean run run-network run-rawchat apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-driver test-network-qemu test-network-rawchat test-network-rawchat-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe
 
 all: check-layout $(OS_IMG)
 
@@ -158,6 +171,28 @@ $(APP_OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.c $(LIB_HEADERS) Makefile | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CLANG) $(LIB_CFLAGS) -c $< -o $@
 
+$(APP_OBJ_DIR)/apps/rawchat/%.o: $(RAWCHAT_APP_DIR)/%.c $(RAWCHAT_APP_HEADERS) $(LIB_HEADERS) Makefile | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CLANG) $(APP_CFLAGS) -c $< -o $@
+
+$(RAWCHAT_APP_BIN): $(RAWCHAT_APP_OBJS) $(RAWCHAT_APP_HEADERS) $(LIB_HEADERS) $(CRT0_OBJ) $(MINILIBC_OBJ) $(ELF2BIN_TOOL) $(LAYOUT_TOOL) $(APP_LINKER_SCRIPT) $(call app_component_objects,rawchat) Makefile | $(BUILD_DIR) $(APP_BUILD_DIR)
+	@echo "Linking multi-source C application 'rawchat'..."
+	@mkdir -p $(dir $@)
+	@$(LAYOUT_TOOL) >/dev/null
+	@if command -v $(LLD) >/dev/null 2>&1; then \
+		echo "Linking '$@' with ld.lld..."; \
+		$(LLD) -m elf_i386 --orphan-handling=error --defsym=APP_LINK_BASE=$(APP_IMAGE_BASE) --defsym=APP_LINK_SIZE=$(APP_IMAGE_SIZE) -T $(APP_LINKER_SCRIPT) --oformat binary $(CRT0_OBJ) $(RAWCHAT_APP_OBJS) $(MINILIBC_OBJ) $(call app_component_objects,rawchat) -o $@; \
+	else \
+		echo "ld.lld not found; linking '$@' with elf2bin..."; \
+		$(ELF2BIN_TOOL) --max-output $(MAX_APP_IMAGE_SIZE) --max-objects $(ELF2BIN_MAX_OBJECTS) --max-symbols $(ELF2BIN_MAX_SYMBOLS) --max-sections $(ELF2BIN_MAX_SECTIONS) --max-relocations $(ELF2BIN_MAX_RELOCATIONS) $@ $(APP_IMAGE_BASE) $(CRT0_OBJ) $(RAWCHAT_APP_OBJS) $(MINILIBC_OBJ) $(call app_component_objects,rawchat); \
+	fi
+	@APP_SIZE=$$(wc -c < $@); \
+	if [ $$APP_SIZE -gt $(MAX_APP_IMAGE_SIZE) ]; then \
+		echo "error: '$@' is $$APP_SIZE bytes; application images are limited to $(MAX_APP_IMAGE_SIZE) bytes."; \
+		rm -f $@; \
+		exit 1; \
+	fi
+
 # Generic rule to compile any C app or library test under transport/
 .SECONDEXPANSION:
 $(APP_BUILD_DIR)/%.bin: transport/%.c $(LIB_HEADERS) $(CRT0_OBJ) $(MINILIBC_OBJ) $(ELF2BIN_TOOL) $(LAYOUT_TOOL) $(APP_LINKER_SCRIPT) $$(call app_component_objects,$$*) Makefile | $(BUILD_DIR) $(APP_BUILD_DIR)
@@ -185,16 +220,19 @@ apps: $(APP_BINS)
 # Single app compile target (usage: make app APP=hello.c or make app APP=hello)
 app:
 	@if [ -z "$(APP)" ]; then \
-		echo "Usage: make app APP=<name.c>"; \
+		echo "Usage: make app APP=<name[.c]>"; \
 		exit 1; \
 	fi; \
 	APP_NAME=$$(basename $(APP) .c); \
 	APP_SOURCE=$(APPS_DIR)/$$APP_NAME.c; \
-	if [ ! -f $$APP_SOURCE ]; then \
+	if [ "$$APP_NAME" = "rawchat" ]; then \
+		$(MAKE) $(RAWCHAT_APP_BIN); \
+	elif [ ! -f $$APP_SOURCE ]; then \
 		echo "error: application source '$$APP_SOURCE' does not exist."; \
 		exit 1; \
-	fi; \
-	$(MAKE) $(APP_BUILD_DIR)/apps/$$APP_NAME.bin
+	else \
+		$(MAKE) $(APP_BUILD_DIR)/apps/$$APP_NAME.bin; \
+	fi
 
 $(KERNEL_BIN): $(KERNEL_DEPS) $(PLATFORM_LAYOUT_DEF) $(LAYOUT_TOOL) Makefile | $(BUILD_DIR)
 	@$(LAYOUT_TOOL) >/dev/null
@@ -267,10 +305,18 @@ $(NETWORK_PHASE_D_BACKEND_TEST_BIN): $(NETWORK_PHASE_D_BACKEND_TEST_SRCS) tests/
 	@mkdir -p $(dir $@)
 	$(CC) $(HOST_CFLAGS) $(NETWORK_PHASE_D_BACKEND_TEST_SRCS) -o $@
 
+$(RAWCHAT_PROTOCOL_TEST_BIN): $(RAWCHAT_PROTOCOL_TEST_SRCS) $(RAWCHAT_APP_HEADERS) $(LIB_DIR)/net/raw.h Makefile | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_C90_CFLAGS) -idirafter $(LIB_DIR) $(RAWCHAT_PROTOCOL_TEST_SRCS) -o $@
+
+test-network-rawchat: $(RAWCHAT_PROTOCOL_TEST_BIN)
+	$(RAWCHAT_PROTOCOL_TEST_BIN)
+	$(PYTHON) host_apps/rawchat/test_rawchat_peer.py
+
 test-network-d1: $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NET_IPV4_LIB_OBJS)
 	$(NETWORK_PHASE_D_BACKEND_TEST_BIN)
 
-test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NET_IPV4_LIB_OBJS)
+test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NET_IPV4_LIB_OBJS) test-network-rawchat
 	$(NETWORK_PHASE_B_TEST_BIN)
 	$(NETWORK_PHASE_D_BACKEND_TEST_BIN)
 
@@ -284,7 +330,10 @@ test-network-abi: $(NETWORK_PHASE_C_ABI_TEST_BIN)
 test-network-driver: $(OS_IMG) $(CHECK_TOOL)
 	$(PYTHON) tests/network_phase_c.py --image $(OS_IMG)
 
-test-network-qemu: test-network-driver test-e2e
+test-network-rawchat-qemu: $(OS_IMG) $(CHECK_TOOL)
+	$(PYTHON) $(APP_TEST_DIR)/rawchat/rawchat_qemu.py --image $(OS_IMG) --checker $(CHECK_TOOL)
+
+test-network-qemu: test-network-driver test-network-rawchat-qemu test-e2e
 
 test-network: test-network-host test-network-abi test-network-qemu
 
@@ -295,6 +344,9 @@ run: $(OS_IMG)
 
 run-network: $(OS_IMG)
 	$(QEMU) -m $(QEMU_MEMORY) -accel tcg -cpu max,rdrand=on -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk -netdev user,id=net0 -device ne2k_isa,netdev=net0,iobase=0x300,irq=9,mac=52:54:00:12:34:56
+
+run-rawchat: $(OS_IMG)
+	$(QEMU) -m $(QEMU_MEMORY) -accel tcg -cpu max,rdrand=on -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk -netdev stream,id=net0,server=off,addr.type=inet,addr.host=$(RAWCHAT_HOST),addr.port=$(RAWCHAT_PORT),reconnect-ms=1000 -device ne2k_isa,netdev=net0,iobase=0x300,irq=9,mac=52:54:00:12:34:56
 
 clean:
 	rm -rf $(BUILD_DIR) $(APP_BUILD_DIR)

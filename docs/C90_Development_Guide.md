@@ -62,7 +62,7 @@ The main supported groups are:
 
 ## 3. Directory Layout for User Applications & Tests
 
-User applications and C library tests are decoupled from the MINI-OS C standard library runtime:
+User applications, application tests, and C library tests are decoupled from the MINI-OS C standard library runtime:
 
 ```plaintext
 transport/
@@ -80,7 +80,15 @@ transport/
 │   ├── calc.c
 │   ├── guess.c
 │   ├── banner.c
-│   └── vedit.c
+│   ├── vedit.c
+│   └── rawchat/             <-- Multi-Source Private Application Component
+│       ├── main.c
+│       ├── protocol.c
+│       └── protocol.h
+├── apps_test/               <-- Application-Specific Software Tests
+│   └── rawchat/
+│       ├── test_protocol.c
+│       └── rawchat_qemu.py
 ├── lib_test/                <-- Dedicated C Library Test Suites
 │   ├── test_string.c
 │   ├── test_heap.c
@@ -115,10 +123,10 @@ int main(void) {
 MINI-OS uses an automated build toolchain:
 
 ```plaintext
-[ transport/apps/*.c ] ──> Clang (strict C90) ──> [ build/transport/apps/*.o ]
-                                                               │
-[ crt0.o + minilibc.o ] ───────────────> [ automatic ld.lld / elf2bin selection ]
-                                                               │
+[ transport/apps application sources ] ──> Clang (strict C90) ──> [ build/transport/apps object tree ]
+                                                                            │
+[ crt0.o + minilibc.o ] ───────────────────────> [ automatic ld.lld / elf2bin selection ]
+                                                                            │
 [ transport/build/apps/*.bin ] ──> [ inject_transport ] ──> [ /transport/ in mini_os.img ]
 ```
 
@@ -150,6 +158,8 @@ To compile a specific application (e.g. `calc.c`):
 ```bash
 make app APP=calc.c
 ```
+
+For the multi-source Raw Chat application, use `make app APP=rawchat`.
 
 ### Step 2: Launch QEMU Emulator
 

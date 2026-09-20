@@ -110,6 +110,9 @@ This document only describes code/file responsibilities.
   - shared high-memory application section placement and complete allocatable-image assertion for the `ld.lld` path
 - `transport/apps/`
   - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`, `netdiag.c`)
+  - `rawchat/`: the multi-source Raw Chat application, including its private strict-C90 protocol implementation
+- `transport/apps_test/`
+  - application-specific software tests; `rawchat/` contains its protocol unit test and QEMU end-to-end test
 - `transport/lib_test/`
   - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, `test_no_space.c`, `test_bss.c`, `test_stack.c`, `test_platform.c`, and `test_network.c`, plus the isolated fail-stop probe `test_guard.c`
 - `transport/build/`

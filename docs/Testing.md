@@ -1,5 +1,9 @@
 # MINI-OS Testing
 
+System, QEMU, and library tests live under `tests/`, while software tests specific to programs under `transport/apps/` live under `transport/apps_test/`.
+
+Host applications keep their focused software tests in their own component directories under `host_apps/`.
+
 ## Test Targets
 
 ```bash
@@ -8,6 +12,8 @@ make check-image
 make network-phase0-check
 make test-network-host
 make test-network-d1
+make test-network-rawchat
+make test-network-rawchat-qemu
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -23,11 +29,17 @@ make test
 
 `make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the deterministic Phase D backend regression.
 
+`make test-network-rawchat` checks the strict-C90 private Raw Chat protocol module and session state, then checks the host application's matching wire format and incremental handling of fragmented and coalesced QEMU stream packets.
+
+`make test-network-rawchat-qemu` runs the application-specific end-to-end test from `transport/apps_test/rawchat/`.
+
+It sends unsolicited and consecutive messages in both directions, injects malformed, duplicate, and gapped messages, reconnects the QEMU stream, and verifies immediate `Esc` exit under a silent peer.
+
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 
 `make test-network-driver` runs a deterministic Ethernet peer against QEMU's NE2000 model and retains packet captures plus debug-console logs under `build/test-artifacts/` only when the regression fails.
 
-`make test-network-qemu` combines the deterministic packet-socket driver regression with the canonical user-network QEMU end-to-end path, while `make test-network` additionally includes the host platform and raw ABI suites.
+`make test-network-qemu` combines the deterministic packet-socket driver regression, the Raw Chat stream regression, and the canonical user-network QEMU end-to-end path, while `make test-network` additionally includes the host platform and raw ABI suites.
 
 `make test-build` first runs the pinned network-feasibility manifest and compiler-helper regression without downloading or compiling external SSH sources.
 

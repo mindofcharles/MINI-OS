@@ -10,6 +10,8 @@ Current status: Phase 0 and Phases A through C are complete. Phase D is in progr
 
 - Phase C: implement the polling NE2000 raw-frame transport. Complete.
 
+- Raw Ethernet Chat: the full-duplex Phase C demonstration, host application, documentation, and deterministic regressions are complete.
+
 - Phase D: implement Ethernet, ARP, static IPv4, and ICMP. D1 interfaces and tests are complete; D2 byte-order, checksum, address parsing, and configuration validation are next.
 
 - Phase E: implement one active TCP connection and `netcat`. Planned.

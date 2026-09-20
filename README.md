@@ -38,11 +38,14 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - `OS_src/boot/`: bootloader sources
 - `OS_src/kernel/`: kernel, shell, drivers, filesystem, IDT & syscalls, and utilities
 - `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`, `check_layout.c`)
+- `host_apps/`: interactive applications that run on the development host, including their focused software tests
 - `transport/`: host files injected into `/transport/` on disk image
   - `transport/lib/`: modern-C runtime and compiler helpers, network/SSH implementation directories, `crt0.asm`, and C90-compatible public headers
-  - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`, `netdiag.c`)
+  - `transport/apps/`: strict C90 applications, including the multi-source `rawchat/` application
+  - `transport/apps_test/`: application-specific software tests
   - `transport/lib_test/`: strict C90 executable tests, including BSS coverage
   - `transport/build/`: compiled flat output binaries (`apps/*.bin`, `lib_test/*.bin`)
+- `tests/`: system, QEMU, and library tests
 - `docs/`: project documentation
 - `build/`: generated kernel binaries and disk image
 
@@ -124,6 +127,7 @@ The generated image is exactly 4,471 sectors (2,289,152 bytes).
 - Filesystem design draft: `docs/DIY-FS.md`
 - Complete system call ABI: `docs/Syscall_ABI.md`
 - Raw Ethernet transport: `docs/Network_Raw_Transport.md`
+- Raw Ethernet chat: `docs/Raw_Ethernet_Chat.md`
 - Runtime support matrix: `docs/Library_Support.md`
 - Automated testing: `docs/Testing.md`
 - Real hardware boot guide: `docs/Real_Hardware_Guide.md`

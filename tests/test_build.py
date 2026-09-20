@@ -1064,20 +1064,23 @@ def verify_per_application_libraries(repo: Path) -> None:
     hello_object = repo / "build/transport/apps/hello.o"
     netdiag_binary = repo / "transport/build/apps/netdiag.bin"
     netdiag_object = repo / "build/transport/apps/netdiag.o"
+    rawchat_binary = repo / "transport/build/apps/rawchat.bin"
+    rawchat_main_object = repo / "build/transport/apps/rawchat/main.o"
+    rawchat_protocol_object = repo / "build/transport/apps/rawchat/protocol.o"
     ping_binary = repo / "transport/build/apps/ping.bin"
     ping_object = repo / "build/transport/apps/ping.o"
     compiler_runtime = repo / "build/compiler_rt.o"
     hello_binary.unlink()
     hello_object.unlink()
     compiler_runtime.unlink(missing_ok=True)
-    for network_object in (repo / "build/transport/lib/net").glob("*.o"):
+    for network_object in (repo / "build/transport/lib/net").rglob("*.o"):
         network_object.unlink()
     hello = run(["make", "transport/build/apps/hello.bin"], repo)
     hello_output = hello.stdout + hello.stderr
     if "compiler_rt.c" in hello_output or "transport/lib/net/" in hello_output:
         raise RuntimeError("ordinary application acquired network-only objects")
     if compiler_runtime.exists() or any(
-        (repo / "build/transport/lib/net").glob("*.o")
+        (repo / "build/transport/lib/net").rglob("*.o")
     ):
         raise RuntimeError("ordinary application built network-only support")
 
@@ -1091,7 +1094,42 @@ def verify_per_application_libraries(repo: Path) -> None:
         or (repo / "build/transport/lib/net/dependency_probe.o").exists()
         or (repo / "build/transport/lib/net/net.o").exists()
     ):
-        raise RuntimeError("raw network application acquired IPv4 objects")
+        raise RuntimeError("raw diagnostic acquired an application protocol object")
+
+    rawchat_binary.unlink(missing_ok=True)
+    rawchat_main_object.unlink(missing_ok=True)
+    rawchat_protocol_object.unlink(missing_ok=True)
+    rawchat = run(["make", "app", "APP=rawchat"], repo)
+    rawchat_output = rawchat.stdout + rawchat.stderr
+    rawchat_protocol_compile = next(
+        (
+            line
+            for line in rawchat_output.splitlines()
+            if " -c " in line and "transport/apps/rawchat/protocol.c" in line
+        ),
+        "",
+    )
+    rawchat_main_compile = next(
+        (
+            line
+            for line in rawchat_output.splitlines()
+            if " -c " in line and "transport/apps/rawchat/main.c" in line
+        ),
+        "",
+    )
+    if (
+        "-std=c90" not in rawchat_protocol_compile
+        or "-pedantic-errors" not in rawchat_protocol_compile
+        or "-std=c90" not in rawchat_main_compile
+        or "-pedantic-errors" not in rawchat_main_compile
+        or not rawchat_main_object.is_file()
+        or not rawchat_protocol_object.is_file()
+        or (repo / "build/transport/lib/net/net.o").exists()
+    ):
+        raise RuntimeError(
+            "Raw Chat did not preserve its strict-C90 application boundary\n"
+            + rawchat_output
+        )
 
     net_source.write_text(
         "unsigned int net_dependency_probe(void)\n{\n"
@@ -1158,6 +1196,8 @@ def verify_per_application_libraries(repo: Path) -> None:
     )
     ping = run(["make", protocol_override, "app", "APP=ping.c"], repo)
     ping_output = ping.stdout + ping.stderr
+    if "build/transport/apps/rawchat/protocol.o" in ping_output:
+        raise RuntimeError("IPv4 application acquired a Raw Chat private object")
     ping_lines = ping_output.splitlines()
     library_compile = next(
         (

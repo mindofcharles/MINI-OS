@@ -12,7 +12,9 @@ The implemented path is end-to-end:
 - `OS_src/kernel/`: shell loop, exceptions, PIC/PIT, secure random, IDT and syscalls, ATA/keyboard/VGA drivers, polling NE2000 transport, and utilities
 - `OS_src/kernel/fs/`: filesystem logic
 - `tools/`: host C tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`, `check_layout.c`)
-- `transport/`: host files injected into `/transport/` (strict-C90 apps and tests, modern-C runtime implementation, and `crt0`)
+- `host_apps/`: interactive host applications and their focused software tests
+- `transport/`: host files injected into `/transport/` (strict-C90 apps and app/library tests, modern-C runtime implementation, and `crt0`)
+- `tests/`: system, QEMU, and library tests
 - `build/`: generated binaries and image
 - `docs/`: documentation set
 
@@ -27,6 +29,7 @@ The implemented path is end-to-end:
 - Filesystem design idea draft: `docs/DIY-FS.md`
 - System call ABI: `docs/Syscall_ABI.md`
 - Raw Ethernet transport: `docs/Network_Raw_Transport.md`
+- Raw Ethernet chat: `docs/Raw_Ethernet_Chat.md`
 - Runtime support matrix: `docs/Library_Support.md`
 - Automated tests: `docs/Testing.md`
 - Real hardware guide: `docs/Real_Hardware_Guide.md`
@@ -42,5 +45,6 @@ The implemented path is end-to-end:
 | `banner.c` | renders text with a 5-by-5 glyph table |
 | `vedit.c` | full-screen text editor using file and cursor syscalls |
 | `netdiag.c` | reports NE2000 state, configuration, frame bounds, and counters |
+| `rawchat/` | exchanges full-duplex messages through the raw Ethernet interface |
 
 These binaries are trusted Ring 0 programs in the kernel address space; the loader is not a process-isolation boundary.
