@@ -29,6 +29,7 @@ Build outputs:
 - `build/elf2bin`
 - `build/check_image`
 - `build/check_layout`
+- `build/transport-inputs.manifest`
 - `build/mini_os.img`
 - `build/transport/apps/*.o`
 - `build/transport/lib_test/*.o`
@@ -101,7 +102,9 @@ The deterministic network regressions run entirely on the host and do not requir
 make test-network-host
 ```
 
-This target creates `build/network-phase-b/platform_test`, compiles the application-level network header under strict C90, and creates `build/network-phase-d/backend_test` with a test-only raw device, frame queues, clock, random source, and cancellation control. Both test-only markers are checked for absence from `build/mini_os.img` by the build regression.
+This target creates `build/network-phase-b/platform_test`, compiles the application-level network header under strict C90, and creates Phase D host binaries for the test-only raw device, byte-order and checksum primitives, canonical IPv4 configuration, and transactional stack initialization.
+
+Both test-only markers are checked for absence from `build/mini_os.img` by the build regression.
 
 ## 4. Run in QEMU
 
@@ -160,6 +163,8 @@ The fallback `elf2bin` capacities are explicit Make variables with defaults of 2
 The kernel target depends on every assembly/layout include below `OS_src/kernel/` and the shared raw-frame definition.
 
 The layout checker, runtime, and application targets also depend on the raw-frame definition where applicable, while runtime and application targets depend on all public runtime headers and `syscall.def`.
+
+The final image depends on every non-generated file and directory injected from `transport/`, so changing, adding, or removing an unlinked source or document still refreshes the in-image tree without rebuilding unrelated binaries.
 
 Ordinary applications link only `crt0` and `minilibc`; `netdiag` and the raw-network executable test add the modern-C raw, platform, and time objects plus compiler helpers; `ping`, `netcat`, and `ssh` additionally add the IPv4 protocol group; and only `ssh` adds the modern-C SSH objects.
 

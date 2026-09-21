@@ -4,7 +4,9 @@
 
 `transport/lib/compiler_rt.c` is also modern C and deliberately supplies the selected network build's unsigned 64-bit division and remainder helpers, but it is linked only into named network applications rather than the common runtime.
 
-`transport/lib/platform.h`, `transport/lib/net/net_platform.h`, and `transport/lib/net/raw.h` remain strict-C90-compatible public headers. Their implementations use the modern-C runtime/library flags.
+`transport/lib/platform.h`, `transport/lib/net/net.h`, `transport/lib/net/net_platform.h`, and `transport/lib/net/raw.h` are strict-C90-compatible public headers.
+
+Their implementations use the modern-C runtime/library flags.
 
 ## Support Matrix
 
@@ -27,6 +29,7 @@
 | Platform services | `clock_monotonic_ms`, `kbd_poll_key`, `get_random` | direct in QEMU | 32-bit wrapping monotonic time; nonblocking translated key poll; RDRAND-only complete fills up to 1,024 bytes with explicit unavailable failure |
 | Network platform helpers | `net_elapsed_ms`, `net_timeout_valid`, `net_timeout_expired`, `net_timeout_remaining`, `net_wait_status`, `net_set_cancel_callback`, `net_cancel_requested` | deterministic host test and strict-C90 header probe | relative durations through `0x7FFFFFFF`; unsigned wrap arithmetic; production cancellation consumes only a nonblocking key poll |
 | Raw Ethernet transport | `net_get_info`, `net_send_frame`, `net_recv_frame` | host ABI test and deterministic QEMU NE2000 peer | polling untagged 60-through-1,514-byte frames; no protocol parsing; synchronous transmit; one-frame nonblocking receive |
+| Network configuration | `net_ipv4_parse`, `net_init` | deterministic host tests and strict-C90 header probe | canonical dotted decimal; static `/1` through `/30` subnet with an on-link gateway; one application-owned stack instance; no packet-protocol processing yet |
 | Definitions | `size_t`, `ptrdiff_t`, `offsetof`, `NULL`, integer limits, `assert` | compile-time | project ABI is 32-bit; `assert` behavior is not an automated test case and a failure terminates through the runtime |
 | Screen helpers | `move_cursor`, `set_cursor`, `clear_screen`, `save_screen`, `restore_screen`, `get_cursor_position` | direct through the automated `vedit test` rendering check | MINI-OS extensions, not standard C APIs |
 

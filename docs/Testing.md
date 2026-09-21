@@ -8,6 +8,7 @@ make check-image
 make network-phase0-check
 make test-network-host
 make test-network-d1
+make test-network-d2
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -19,9 +20,13 @@ make test
 
 `make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs the host network, raw ABI, build-policy, deterministic NE2000, and general QEMU end-to-end regressions.
 
-`make test-network-host` compiles the application-level network header under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, and receive-queue regressions without linking the production syscall adapter.
+`make test-network-host` compiles the application-level network header under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, receive-queue, byte-order, checksum, address, configuration, and initialization regressions without linking the production syscall adapter.
 
 `make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the deterministic Phase D backend regression.
+
+`make test-network-d2` tests unaligned network-byte-order access, even, odd, empty, corrupted, and maximum-frame checksums, canonical IPv4 text parsing, supported static subnets, timing bounds, device-contract validation, one-time initialization, and failure atomicity.
+
+It also target-compiles every implemented IPv4-group source as modern C with fatal warnings.
 
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 
@@ -126,6 +131,7 @@ It boots and asserts:
 - rejection of missing, duplicate, or nonexistent network source-group assignments;
 - proof that ordinary applications acquire no network objects, raw network applications acquire only the base group, IPv4 applications acquire the separately selected modern-C protocol group and compiler helpers under both linkers, the fixed network context remains within a bounded BSS allocation, and only the SSH application acquires SSH objects;
 - a no-op incremental build;
+- transport-tree reinjection after an unlinked source changes, without rebuilding unrelated binaries;
 - runtime-header and kernel-include dependency rebuilding;
 - a clean build with `ld.lld` unavailable, forcing `elf2bin`;
 - QEMU BSS and application-stack smoke boots for both flat-binary producers.

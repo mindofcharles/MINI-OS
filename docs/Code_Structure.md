@@ -98,12 +98,14 @@ This document only describes code/file responsibilities.
   - host C 32-bit ELF linker and flat binary generator with checked output, object, global-symbol, per-object-section, and relocation capacities
 - `tools/check_layout.c`
   - host C verifier for platform-memory consistency, bounds, alignment, containment, adjacency, pairwise non-overlap, and shared raw-frame-plus-alignment capacity
+- `tools/transport_manifest.sh`
+  - deterministic content manifest for non-generated files and directories injected from `transport/`, used to refresh the image without forcing unrelated binaries to rebuild
 - `transport/lib/`
   - `crt0.asm`: C runtime startup file (`_start`)
   - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
   - `platform.h`: C90-compatible monotonic-clock, nonblocking-key, and secure-random declarations
   - `compiler_rt.c`: modern-C unsigned 64-bit division and remainder helpers linked only where required
-  - `net/`: modern-C network implementation directory, including raw-frame syscall wrappers, shared C/assembly ABI definitions, wrap-safe time helpers, and production platform/cancellation adapters
+  - `net/`: modern-C network implementation directory, including raw-frame syscall wrappers, shared C/assembly ABI definitions, wrap-safe time helpers, production platform/cancellation adapters, byte-order and checksum primitives, static IPv4 configuration validation, and transactional stack initialization
   - `ssh/`: modern-C SSH implementation directory
   - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
 - `transport/app.ld`
@@ -135,3 +137,5 @@ This document only describes code/file responsibilities.
   - deterministic clock/random/cancellation platform and host regression linked separately from production platform code
 - `tests/network_phase_c.py` / `tests/network_phase_c/`
   - deterministic QEMU Ethernet peer, failure-only packet captures, raw-frame boundary/reuse/ring-wrap/recovery checks, and host ABI layout regression
+- `tests/network_phase_d/`
+  - strict-C90 public-header probe plus deterministic backend, byte-order, checksum, IPv4 configuration, device-contract, initialization, and failure-atomicity host regressions

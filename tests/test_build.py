@@ -1052,6 +1052,12 @@ def phase_a_image_boundaries(repo: Path, base: int, image_size: int) -> None:
 def verify_per_application_libraries(repo: Path) -> None:
     net_directory = repo / "transport/lib/net"
     ssh_directory = repo / "transport/lib/ssh"
+    ipv4_sources = [
+        "transport/lib/net/net.c",
+        "transport/lib/net/address.c",
+        "transport/lib/net/byteorder.c",
+        "transport/lib/net/checksum.c",
+    ]
     ping_source = repo / "transport/apps/ping.c"
     ssh_app_source = repo / "transport/apps/ssh.c"
     net_source = net_directory / "dependency_probe.c"
@@ -1087,9 +1093,16 @@ def verify_per_application_libraries(repo: Path) -> None:
     netdiag_output = netdiag.stdout + netdiag.stderr
     if (
         "dependency_probe.c" in netdiag_output
-        or "transport/lib/net/net.c" in netdiag_output
+        or any(source in netdiag_output for source in ipv4_sources)
         or (repo / "build/transport/lib/net/dependency_probe.o").exists()
-        or (repo / "build/transport/lib/net/net.o").exists()
+        or any(
+            (
+                repo
+                / "build/transport/lib/net"
+                / Path(source).with_suffix(".o").name
+            ).exists()
+            for source in ipv4_sources
+        )
     ):
         raise RuntimeError("raw network application acquired IPv4 objects")
 
@@ -1107,9 +1120,11 @@ def verify_per_application_libraries(repo: Path) -> None:
     ):
         raise RuntimeError("build did not reject an ungrouped network source")
 
-    duplicate_override = (
-        "NET_IPV4_LIB_SRCS=transport/lib/net/net.c "
-        "transport/lib/net/raw.c transport/lib/net/dependency_probe.c"
+    duplicate_override = "NET_IPV4_LIB_SRCS=" + " ".join(
+        ipv4_sources + [
+            "transport/lib/net/raw.c",
+            "transport/lib/net/dependency_probe.c",
+        ]
     )
     duplicate = run(
         ["make", "-n", duplicate_override, "app", "APP=netdiag.c"],
@@ -1121,9 +1136,11 @@ def verify_per_application_libraries(repo: Path) -> None:
     ):
         raise RuntimeError("build did not reject duplicate network grouping")
 
-    missing_override = (
-        "NET_IPV4_LIB_SRCS=transport/lib/net/net.c "
-        "transport/lib/net/dependency_probe.c transport/lib/net/missing_probe.c"
+    missing_override = "NET_IPV4_LIB_SRCS=" + " ".join(
+        ipv4_sources + [
+            "transport/lib/net/dependency_probe.c",
+            "transport/lib/net/missing_probe.c",
+        ]
     )
     missing = run(
         ["make", "-n", missing_override, "app", "APP=netdiag.c"],
@@ -1152,9 +1169,8 @@ def verify_per_application_libraries(repo: Path) -> None:
         encoding="ascii",
     )
 
-    protocol_override = (
-        "NET_IPV4_LIB_SRCS=transport/lib/net/net.c "
-        "transport/lib/net/dependency_probe.c"
+    protocol_override = "NET_IPV4_LIB_SRCS=" + " ".join(
+        ipv4_sources + ["transport/lib/net/dependency_probe.c"]
     )
     ping = run(["make", protocol_override, "app", "APP=ping.c"], repo)
     ping_output = ping.stdout + ping.stderr
@@ -1311,6 +1327,28 @@ def main() -> int:
         run(["make"], repo)
         assert_changed(before, tracked[1:], "runtime-header dependency")
         assert_unchanged(before, tracked[:1], "runtime-header dependency")
+
+        injected_source = repo / "transport/lib/net/address.c"
+        injected_marker = b"MINI_OS_TRANSPORT_DEPENDENCY_MARKER"
+        with injected_source.open("ab") as stream:
+            stream.write(b"\n/* " + injected_marker + b" */\n")
+        make_source_newer(injected_source)
+        image_path = repo / "build/mini_os.img"
+        unaffected = [
+            repo / "build/kernel.bin",
+            repo / "build/minilibc.o",
+            repo / "transport/build/apps/hello.bin",
+            repo / "transport/build/apps/netdiag.bin",
+        ]
+        before_image = {image_path: timestamp(image_path)}
+        before_unaffected = {path: timestamp(path) for path in unaffected}
+        run(["make"], repo)
+        assert_changed(before_image, [image_path], "transport-tree dependency")
+        assert_unchanged(
+            before_unaffected, unaffected, "transport-tree dependency"
+        )
+        if injected_marker not in image_path.read_bytes():
+            raise RuntimeError("rebuilt image omitted the changed transport source")
 
         driver = repo / "OS_src/kernel/drivers.asm"
         with driver.open("a", encoding="utf-8") as stream:

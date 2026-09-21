@@ -34,6 +34,8 @@ APPS_DIR := transport/apps
 LIB_TEST_DIR := transport/lib_test
 APP_BUILD_DIR := transport/build
 APP_OBJ_DIR := $(BUILD_DIR)/transport
+TRANSPORT_MANIFEST_TOOL := tools/transport_manifest.sh
+TRANSPORT_INJECT_MANIFEST := $(BUILD_DIR)/transport-inputs.manifest
 
 CRT0_SRC := $(LIB_DIR)/crt0.asm
 MINILIBC_SRC := $(LIB_DIR)/minilibc.c
@@ -45,7 +47,7 @@ MINILIBC_OBJ := $(BUILD_DIR)/minilibc.o
 COMPILER_RT_OBJ := $(BUILD_DIR)/compiler_rt.o
 
 NET_BASE_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,raw.c platform.c time.c)
-NET_IPV4_LIB_SRCS := $(LIB_DIR)/net/net.c
+NET_IPV4_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,net.c address.c byteorder.c checksum.c)
 NET_ALL_LIB_SRCS := $(shell find $(LIB_DIR)/net -type f -name '*.c' 2>/dev/null | sort)
 NET_GROUPED_LIB_SRCS := $(NET_BASE_LIB_SRCS) $(NET_IPV4_LIB_SRCS)
 duplicate_words = $(sort $(foreach item,$(1),$(if $(word 2,$(filter $(item),$(1))),$(item))))
@@ -102,6 +104,10 @@ NETWORK_PHASE_C_ABI_TEST_SRC := tests/network_phase_c/test_raw_abi.c
 NETWORK_PHASE_D_PUBLIC_HEADER_OBJ := $(BUILD_DIR)/network-phase-d/public_header.o
 NETWORK_PHASE_D_BACKEND_TEST_BIN := $(BUILD_DIR)/network-phase-d/backend_test
 NETWORK_PHASE_D_BACKEND_TEST_SRCS := tests/network_phase_d/test_backend.c tests/network_phase_d/deterministic_backend.c
+NETWORK_PHASE_D_PRIMITIVE_TEST_BIN := $(BUILD_DIR)/network-phase-d/primitive_test
+NETWORK_PHASE_D_PRIMITIVE_TEST_SRCS := tests/network_phase_d/test_primitives.c $(LIB_DIR)/net/byteorder.c $(LIB_DIR)/net/checksum.c
+NETWORK_PHASE_D_ADDRESS_TEST_BIN := $(BUILD_DIR)/network-phase-d/address_test
+NETWORK_PHASE_D_ADDRESS_TEST_SRCS := tests/network_phase_d/test_address.c tests/network_phase_d/deterministic_backend.c $(LIB_DIR)/net/address.c $(LIB_DIR)/net/net.c
 
 TARGET_CFLAGS := -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -I$(LIB_DIR)
 LIB_CFLAGS := $(TARGET_CFLAGS) -std=gnu11
@@ -116,12 +122,22 @@ ELF2BIN_MAX_SECTIONS ?= 4096
 ELF2BIN_MAX_RELOCATIONS ?= 32768
 QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
 
-.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe
+.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe transport-inputs-force
 
 all: check-layout $(OS_IMG)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
+
+transport-inputs-force:
+
+$(TRANSPORT_INJECT_MANIFEST): transport-inputs-force $(TRANSPORT_MANIFEST_TOOL) | $(BUILD_DIR)
+	@sh $(TRANSPORT_MANIFEST_TOOL) transport $(APP_BUILD_DIR) > $@.tmp
+	@if [ -f $@ ] && cmp -s $@.tmp $@; then \
+		rm -f $@.tmp; \
+	else \
+		mv $@.tmp $@; \
+	fi
 
 $(APP_BUILD_DIR):
 	mkdir -p $(APP_BUILD_DIR)
@@ -209,7 +225,7 @@ $(BOOT_BIN): $(BOOT_SRC) $(KERNEL_BIN) $(FS_LAYOUT_DEF) $(PLATFORM_LAYOUT_DEF) M
 	fi; \
 	$(NASM) -f bin -d KERNEL_SECTORS=$$KERNEL_SECTORS $(BOOT_SRC) -o $(BOOT_BIN)
 
-$(OS_IMG): $(BOOT_BIN) $(KERNEL_BIN) $(INJECT_TOOL) $(CHECK_TOOL) $(APP_BINS) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
+$(OS_IMG): $(BOOT_BIN) $(KERNEL_BIN) $(INJECT_TOOL) $(CHECK_TOOL) $(APP_BINS) $(TRANSPORT_INJECT_MANIFEST) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
 	dd if=/dev/zero of=$(OS_IMG) bs=512 count=$(OS_SECTORS)
 	@IMAGE_SIZE=$$(wc -c < $(OS_IMG)); \
 	EXPECTED_SIZE=$$(( $(OS_SECTORS) * 512 )); \
@@ -267,12 +283,26 @@ $(NETWORK_PHASE_D_BACKEND_TEST_BIN): $(NETWORK_PHASE_D_BACKEND_TEST_SRCS) tests/
 	@mkdir -p $(dir $@)
 	$(CC) $(HOST_CFLAGS) $(NETWORK_PHASE_D_BACKEND_TEST_SRCS) -o $@
 
-test-network-d1: $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NET_IPV4_LIB_OBJS)
+$(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN): $(NETWORK_PHASE_D_PRIMITIVE_TEST_SRCS) $(LIB_HEADERS) Makefile | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_CFLAGS) $(NETWORK_PHASE_D_PRIMITIVE_TEST_SRCS) -o $@
+
+$(NETWORK_PHASE_D_ADDRESS_TEST_BIN): $(NETWORK_PHASE_D_ADDRESS_TEST_SRCS) tests/network_phase_d/deterministic_backend.h $(LIB_HEADERS) Makefile | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_CFLAGS) $(NETWORK_PHASE_D_ADDRESS_TEST_SRCS) -o $@
+
+test-network-d1: $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(APP_OBJ_DIR)/lib/net/net.o
 	$(NETWORK_PHASE_D_BACKEND_TEST_BIN)
 
-test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NET_IPV4_LIB_OBJS)
+test-network-d2: $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NET_IPV4_LIB_OBJS)
+	$(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN)
+	$(NETWORK_PHASE_D_ADDRESS_TEST_BIN)
+
+test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NET_IPV4_LIB_OBJS)
 	$(NETWORK_PHASE_B_TEST_BIN)
 	$(NETWORK_PHASE_D_BACKEND_TEST_BIN)
+	$(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN)
+	$(NETWORK_PHASE_D_ADDRESS_TEST_BIN)
 
 $(NETWORK_PHASE_C_ABI_TEST_BIN): $(NETWORK_PHASE_C_ABI_TEST_SRC) $(LIB_DIR)/net/raw.h $(LIB_DIR)/net/raw.def $(LIB_DIR)/syscall.def Makefile | $(BUILD_DIR)
 	@mkdir -p $(dir $@)

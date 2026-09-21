@@ -50,10 +50,13 @@ struct net_ping_result {
  * NET_TIMEOUT_MAX_MS.  Zero permits one nonblocking receive and timer pass.
  */
 
-/* Accepts exactly four decimal components without whitespace or signs. */
+/*
+ * Accepts exactly four canonical decimal components without whitespace or
+ * signs.  A multi-digit component may not start with zero.
+ */
 int net_ipv4_parse(const char *text, struct net_ipv4_addr *address);
 
-/* Copies a valid static configuration and initializes the single stack. */
+/* Validates and copies a static configuration into the single stack once. */
 int net_init(const struct net_config *config);
 
 /* Returns a positive action count, zero for no work, or a net_error value. */

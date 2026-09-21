@@ -14,4 +14,8 @@ The platform layer supplies `net_platform.h`, wrap-safe relative-time helpers, p
 
 The raw transport supplies `raw.h`, shared `raw.def` layout constants, and modern-C wrappers for the three polling NE2000 frame syscalls.
 
-Stage D1 provides the public boundary, fixed state, and deterministic backend; Ethernet, ARP, IPv4, and ICMP packet processing is not implemented yet.
+Stage D1 provides the public boundary, fixed state, and deterministic backend.
+
+Stage D2 provides alignment-safe network-byte-order helpers, the Internet checksum, canonical dotted-decimal IPv4 parsing, static configuration validation, raw-device contract validation, and transactional one-time initialization.
+
+Ethernet, ARP, IPv4, and ICMP packet processing is not implemented yet.
