@@ -78,6 +78,7 @@ struct net_context {
     struct net_pending_echo pending_echo;
     struct net_protocol_counters counters;
     int initialized;
+    int tx_prepared;
 };
 
 extern struct net_context net_global_context;

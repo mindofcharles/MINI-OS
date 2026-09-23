@@ -1057,6 +1057,7 @@ def verify_per_application_libraries(repo: Path) -> None:
         "transport/lib/net/address.c",
         "transport/lib/net/byteorder.c",
         "transport/lib/net/checksum.c",
+        "transport/lib/net/ethernet.c",
     ]
     ping_source = repo / "transport/apps/ping.c"
     ssh_app_source = repo / "transport/apps/ssh.c"

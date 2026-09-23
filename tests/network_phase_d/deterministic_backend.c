@@ -26,7 +26,8 @@ static unsigned int fake_clock;
 static unsigned int fake_random_state;
 static int forced_cancelled;
 static int next_info_error;
-static int next_send_error;
+static int next_send_result;
+static int next_send_result_set;
 static net_cancel_callback active_cancel_callback;
 static void *active_cancel_context;
 
@@ -63,7 +64,8 @@ void phase_d_backend_reset(void)
     fake_random_state = 0x4D494E49U;
     forced_cancelled = 0;
     next_info_error = 0;
-    next_send_error = 0;
+    next_send_result = 0;
+    next_send_result_set = 0;
     active_cancel_callback = 0;
     active_cancel_context = 0;
     initialize_device_info();
@@ -117,7 +119,18 @@ int phase_d_backend_set_next_send_error(int error)
     if (error >= 0) {
         return SYS_ERR_INVALID;
     }
-    next_send_error = error;
+    next_send_result = error;
+    next_send_result_set = 1;
+    return 0;
+}
+
+int phase_d_backend_set_next_send_result(int result)
+{
+    if (result < 0) {
+        return SYS_ERR_INVALID;
+    }
+    next_send_result = result;
+    next_send_result_set = 1;
     return 0;
 }
 
@@ -207,7 +220,8 @@ int net_get_info(struct net_device_info *info)
 
 int net_send_frame(const void *frame, unsigned int length)
 {
-    int error;
+    int forced_result;
+    int forced_result_set;
 
     if (frame == 0) {
         return SYS_ERR_INVALID;
@@ -215,10 +229,12 @@ int net_send_frame(const void *frame, unsigned int length)
     if (length < NET_FRAME_MIN || length > NET_FRAME_MAX) {
         return SYS_ERR_RANGE;
     }
-    error = next_send_error;
-    next_send_error = 0;
-    if (error < 0) {
-        return error;
+    forced_result = next_send_result;
+    forced_result_set = next_send_result_set;
+    next_send_result = 0;
+    next_send_result_set = 0;
+    if (forced_result_set && forced_result < 0) {
+        return forced_result;
     }
     if (transmit_count >= PHASE_D_BACKEND_QUEUE_CAPACITY) {
         return SYS_ERR_RANGE;
@@ -226,7 +242,7 @@ int net_send_frame(const void *frame, unsigned int length)
     memcpy(transmitted[transmit_count].data, frame, length);
     transmitted[transmit_count].length = length;
     ++transmit_count;
-    return (int)length;
+    return forced_result_set ? forced_result : (int)length;
 }
 
 int net_recv_frame(void *frame, unsigned int capacity)

@@ -18,4 +18,8 @@ Stage D1 provides the public boundary, fixed state, and deterministic backend.
 
 Stage D2 provides alignment-safe network-byte-order helpers, the Internet checksum, canonical dotted-decimal IPv4 parsing, static configuration validation, raw-device contract validation, and transactional one-time initialization.
 
-Ethernet, ARP, IPv4, and ICMP packet processing is not implemented yet.
+Stage D3 provides private Ethernet II frame construction and classification, destination and source validation, explicit zero padding, normalized-frame length checks, and deterministic host tests.
+
+The Ethernet receive view includes the complete data field, including padding, so later protocol parsers must validate their own logical lengths.
+
+ARP, IPv4, and ICMP packet processing and the public polling API are not implemented yet.

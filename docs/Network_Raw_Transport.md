@@ -4,7 +4,9 @@
 
 MINI-OS currently provides a polling NE2000-compatible driver and three system calls for complete untagged Ethernet frames.
 
-This transport is the hardware boundary for future modern-C protocol code, but it does not implement Ethernet protocol dispatch, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, or SSH.
+This transport is the hardware boundary for modern-C protocol code and does not itself classify Ethernet frames or implement ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, or SSH.
+
+The separately linked application network library now contains a private Ethernet II classifier and transmitter, but ARP and higher-layer protocol processing remain unimplemented.
 
 ## Device Contract
 

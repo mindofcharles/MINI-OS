@@ -47,7 +47,8 @@ MINILIBC_OBJ := $(BUILD_DIR)/minilibc.o
 COMPILER_RT_OBJ := $(BUILD_DIR)/compiler_rt.o
 
 NET_BASE_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,raw.c platform.c time.c)
-NET_IPV4_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,net.c address.c byteorder.c checksum.c)
+NET_PHASE_D2_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,net.c address.c byteorder.c checksum.c)
+NET_IPV4_LIB_SRCS := $(NET_PHASE_D2_LIB_SRCS) $(LIB_DIR)/net/ethernet.c
 NET_ALL_LIB_SRCS := $(shell find $(LIB_DIR)/net -type f -name '*.c' 2>/dev/null | sort)
 NET_GROUPED_LIB_SRCS := $(NET_BASE_LIB_SRCS) $(NET_IPV4_LIB_SRCS)
 duplicate_words = $(sort $(foreach item,$(1),$(if $(word 2,$(filter $(item),$(1))),$(item))))
@@ -67,6 +68,7 @@ endif
 
 SSH_LIB_SRCS := $(shell find $(LIB_DIR)/ssh -type f -name '*.c' 2>/dev/null | sort)
 NET_BASE_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_BASE_LIB_SRCS))
+NET_PHASE_D2_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_PHASE_D2_LIB_SRCS))
 NET_IPV4_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_IPV4_LIB_SRCS))
 SSH_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(SSH_LIB_SRCS))
 NETWORK_BASE_APP_NAMES := netdiag ping netcat ssh test_network
@@ -108,6 +110,8 @@ NETWORK_PHASE_D_PRIMITIVE_TEST_BIN := $(BUILD_DIR)/network-phase-d/primitive_tes
 NETWORK_PHASE_D_PRIMITIVE_TEST_SRCS := tests/network_phase_d/test_primitives.c $(LIB_DIR)/net/byteorder.c $(LIB_DIR)/net/checksum.c
 NETWORK_PHASE_D_ADDRESS_TEST_BIN := $(BUILD_DIR)/network-phase-d/address_test
 NETWORK_PHASE_D_ADDRESS_TEST_SRCS := tests/network_phase_d/test_address.c tests/network_phase_d/deterministic_backend.c $(LIB_DIR)/net/address.c $(LIB_DIR)/net/net.c
+NETWORK_PHASE_D_ETHERNET_TEST_BIN := $(BUILD_DIR)/network-phase-d/ethernet_test
+NETWORK_PHASE_D_ETHERNET_TEST_SRCS := tests/network_phase_d/test_ethernet.c tests/network_phase_d/deterministic_backend.c $(LIB_DIR)/net/net.c $(LIB_DIR)/net/address.c $(LIB_DIR)/net/byteorder.c $(LIB_DIR)/net/ethernet.c
 
 TARGET_CFLAGS := -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -I$(LIB_DIR)
 LIB_CFLAGS := $(TARGET_CFLAGS) -std=gnu11
@@ -122,7 +126,7 @@ ELF2BIN_MAX_SECTIONS ?= 4096
 ELF2BIN_MAX_RELOCATIONS ?= 32768
 QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
 
-.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe transport-inputs-force
+.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-d3 test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe transport-inputs-force
 
 all: check-layout $(OS_IMG)
 
@@ -291,18 +295,26 @@ $(NETWORK_PHASE_D_ADDRESS_TEST_BIN): $(NETWORK_PHASE_D_ADDRESS_TEST_SRCS) tests/
 	@mkdir -p $(dir $@)
 	$(CC) $(HOST_CFLAGS) $(NETWORK_PHASE_D_ADDRESS_TEST_SRCS) -o $@
 
+$(NETWORK_PHASE_D_ETHERNET_TEST_BIN): $(NETWORK_PHASE_D_ETHERNET_TEST_SRCS) tests/network_phase_d/deterministic_backend.h $(LIB_HEADERS) Makefile | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(HOST_CFLAGS) $(NETWORK_PHASE_D_ETHERNET_TEST_SRCS) -o $@
+
 test-network-d1: $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(APP_OBJ_DIR)/lib/net/net.o
 	$(NETWORK_PHASE_D_BACKEND_TEST_BIN)
 
-test-network-d2: $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NET_IPV4_LIB_OBJS)
+test-network-d2: $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NET_PHASE_D2_LIB_OBJS)
 	$(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN)
 	$(NETWORK_PHASE_D_ADDRESS_TEST_BIN)
 
-test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NET_IPV4_LIB_OBJS)
+test-network-d3: $(NETWORK_PHASE_D_ETHERNET_TEST_BIN) $(NET_IPV4_LIB_OBJS)
+	$(NETWORK_PHASE_D_ETHERNET_TEST_BIN)
+
+test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NETWORK_PHASE_D_ETHERNET_TEST_BIN) $(NET_IPV4_LIB_OBJS)
 	$(NETWORK_PHASE_B_TEST_BIN)
 	$(NETWORK_PHASE_D_BACKEND_TEST_BIN)
 	$(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN)
 	$(NETWORK_PHASE_D_ADDRESS_TEST_BIN)
+	$(NETWORK_PHASE_D_ETHERNET_TEST_BIN)
 
 $(NETWORK_PHASE_C_ABI_TEST_BIN): $(NETWORK_PHASE_C_ABI_TEST_SRC) $(LIB_DIR)/net/raw.h $(LIB_DIR)/net/raw.def $(LIB_DIR)/syscall.def Makefile | $(BUILD_DIR)
 	@mkdir -p $(dir $@)

@@ -18,6 +18,7 @@ void phase_d_backend_set_cancelled(int cancelled);
 int phase_d_backend_set_device_info(const struct net_device_info *info);
 int phase_d_backend_set_next_info_error(int error);
 int phase_d_backend_set_next_send_error(int error);
+int phase_d_backend_set_next_send_result(int result);
 
 int phase_d_backend_queue_receive(const void *frame, unsigned int length);
 int phase_d_backend_queue_receive_error(int error);

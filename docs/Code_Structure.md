@@ -105,7 +105,7 @@ This document only describes code/file responsibilities.
   - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
   - `platform.h`: C90-compatible monotonic-clock, nonblocking-key, and secure-random declarations
   - `compiler_rt.c`: modern-C unsigned 64-bit division and remainder helpers linked only where required
-  - `net/`: modern-C network implementation directory, including raw-frame syscall wrappers, shared C/assembly ABI definitions, wrap-safe time helpers, production platform/cancellation adapters, byte-order and checksum primitives, static IPv4 configuration validation, and transactional stack initialization
+  - `net/`: modern-C network implementation directory, including raw-frame syscall wrappers, shared C/assembly ABI definitions, wrap-safe time helpers, production platform/cancellation adapters, byte-order and checksum primitives, static IPv4 configuration validation, transactional stack initialization, and private Ethernet II framing/classification
   - `ssh/`: modern-C SSH implementation directory
   - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
 - `transport/app.ld`
@@ -138,4 +138,4 @@ This document only describes code/file responsibilities.
 - `tests/network_phase_c.py` / `tests/network_phase_c/`
   - deterministic QEMU Ethernet peer, failure-only packet captures, raw-frame boundary/reuse/ring-wrap/recovery checks, and host ABI layout regression
 - `tests/network_phase_d/`
-  - strict-C90 public-header probe plus deterministic backend, byte-order, checksum, IPv4 configuration, device-contract, initialization, and failure-atomicity host regressions
+  - strict-C90 public-header probe plus deterministic backend, byte-order, checksum, IPv4 configuration, device-contract, initialization, failure-atomicity, and Ethernet framing host regressions
