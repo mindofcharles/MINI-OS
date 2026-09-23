@@ -105,15 +105,15 @@ This document only describes code/file responsibilities.
   - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
   - `platform.h`: C90-compatible monotonic-clock, nonblocking-key, and secure-random declarations
   - `compiler_rt.c`: modern-C unsigned 64-bit division and remainder helpers linked only where required
-  - `net/`: modern-C network implementation directory, including raw-frame syscall wrappers, shared C/assembly ABI definitions, wrap-safe time helpers, production platform/cancellation adapters, byte-order and checksum primitives, static IPv4 configuration validation, transactional stack initialization, private Ethernet II framing/classification, ARP parsing/cache/resolution, and polling dispatch
+  - `net/`: modern-C network implementation directory, including raw-frame syscall wrappers, shared C/assembly ABI definitions, wrap-safe time helpers, production platform/cancellation adapters, byte-order and checksum primitives, static IPv4 configuration validation, transactional stack initialization, private Ethernet II framing/classification, ARP parsing/cache/resolution, restricted IPv4 and ICMP Echo processing, and polling dispatch
   - `ssh/`: modern-C SSH implementation directory
   - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
 - `transport/app.ld`
   - shared high-memory application section placement and complete allocatable-image assertion for the `ld.lld` path
 - `transport/apps/`
-  - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`, `netdiag.c`)
+  - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`, `netdiag.c`, `ping.c`)
 - `transport/lib_test/`
-  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, `test_no_space.c`, `test_bss.c`, `test_stack.c`, `test_platform.c`, and `test_network.c`, plus the isolated fail-stop probe `test_guard.c`
+  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, `test_no_space.c`, `test_bss.c`, `test_stack.c`, `test_platform.c`, `test_network.c`, and `test_net_protocol.c`, plus the isolated fail-stop probe `test_guard.c`
 - `transport/build/`
   - compiled flat binary outputs (`apps/*.bin`, `lib_test/*.bin`)
 
@@ -125,7 +125,7 @@ This document only describes code/file responsibilities.
   - strict-C90 application and modern-C library policies with per-application network and SSH object selection
   - shared layout-derived linker, loader-capacity, kernel-reservation, and QEMU-memory values
   - mandatory final-image integrity check
-  - normal and network QEMU run targets, raw-network ABI and driver regressions, plus aggregate test and clean targets
+  - normal and network QEMU run targets, raw-network ABI, driver, and protocol regressions, plus aggregate test and clean targets
 
 ## 10. Automated Test Drivers
 
@@ -137,5 +137,7 @@ This document only describes code/file responsibilities.
   - deterministic clock/random/cancellation platform and host regression linked separately from production platform code
 - `tests/network_phase_c.py` / `tests/network_phase_c/`
   - deterministic QEMU Ethernet peer, failure-only packet captures, raw-frame boundary/reuse/ring-wrap/recovery checks, and host ABI layout regression
+- `tests/qemu_packet_socket.py` / `tests/network_phase_d.py`
+  - shared QEMU packet-socket framing and deterministic ARP/ICMP protocol acceptance, plus a separate user-network Ping check
 - `tests/network_phase_d/`
-  - strict-C90 public-header probe plus deterministic backend, byte-order, checksum, IPv4 configuration, device-contract, initialization, failure-atomicity, Ethernet framing, ARP cache/resolution, and polling host regressions
+  - strict-C90 public-header probe plus deterministic backend, byte-order, checksum, IPv4 configuration, device-contract, initialization, failure-atomicity, Ethernet framing, ARP cache/resolution, IPv4, ICMP Echo, and polling host regressions

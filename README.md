@@ -29,6 +29,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - Custom filesystem with persistent directory tree and fail-stop detection of interrupted mutations
 - Complete IDT with fatal exception diagnostics, remapped 8259 IRQs, a dedicated interrupt stack, and PIT IRQ0 monotonic timekeeping
 - Polling NE2000 raw Ethernet transport with bounded Remote DMA, transmit, receive-ring, overrun, reset, and unavailable-device paths
+- Application-linked modern-C Ethernet II, ARP, static IPv4, and ICMP Echo with a strict-C90 `ping` application
 - `int 0x80` System Call Engine for console, heap, file, cursor, monotonic-clock, nonblocking-key, RDRAND-backed secure-random, and raw-frame services
 - FAT-chain executable loader (`run <file>`) for flat binaries up to 512 KiB at `0x00100000`
 - Modern-C runtime implementation with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
@@ -43,7 +44,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`, `check_layout.c`)
 - `transport/`: host files injected into `/transport/` on disk image
   - `transport/lib/`: modern-C runtime and compiler helpers, network/SSH implementation directories, `crt0.asm`, and C90-compatible public headers
-  - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`, `netdiag.c`)
+  - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`, `netdiag.c`, `ping.c`)
   - `transport/lib_test/`: strict C90 executable tests, including BSS coverage
   - `transport/build/`: compiled flat output binaries (`apps/*.bin`, `lib_test/*.bin`)
 - `docs/`: project documentation

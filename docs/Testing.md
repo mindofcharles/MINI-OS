@@ -12,6 +12,7 @@ make test-network-d2
 make test-network-d3
 make test-network-d4
 make test-network-d5
+make test-network-d6
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -21,7 +22,7 @@ make test-build
 make test
 ```
 
-`make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs the host network, raw ABI, build-policy, deterministic NE2000, and general QEMU end-to-end regressions.
+`make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs the host network, raw ABI, build-policy, deterministic NE2000, ARP/ICMP protocol, and general QEMU end-to-end regressions.
 
 `make test-network-host` compiles the application-level network header and `ping.c` under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, receive-queue, byte-order, checksum, address, configuration, initialization, Ethernet, ARP, IPv4, ICMP Echo, and polling regressions without linking the production syscall adapter into host tests.
 
@@ -41,13 +42,15 @@ It also target-compiles the current IPv4-group sources as modern C with fatal wa
 
 `make test-network-d5` verifies IPv4 and ICMP truncation boundaries, header and message checksums, exact payload lengths without Ethernet padding, fragment and option rejection, Echo Request replies, maximum payload transmission, full Echo Reply matching, off-link routing, shared ARP/Echo deadlines, zero timeout, cancellation, and clock wrap.
 
-It target-compiles the network library as modern C with fatal warnings and builds `ping.c` as a strict-C90 application; QEMU ARP and ICMP protocol acceptance remains a separate regression.
+It target-compiles the network library as modern C with fatal warnings and builds `ping.c` as a strict-C90 application; the separate D6 target checks QEMU protocol acceptance.
+
+`make test-network-d6` checks exact ARP and ICMP wire packets through the production NE2000 driver, malformed and unrelated reply rejection, cache reuse and expiry, active inbound replies, bounded ARP and Echo timeouts, keyboard cancellation, and four successful Ping replies from the QEMU user-network router.
 
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 
 `make test-network-driver` runs a deterministic Ethernet peer against QEMU's NE2000 model and retains packet captures plus debug-console logs under `build/test-artifacts/` only when the regression fails.
 
-`make test-network-qemu` combines the deterministic packet-socket driver regression with the canonical user-network QEMU end-to-end path, while `make test-network` additionally includes the host platform and raw ABI suites.
+`make test-network-qemu` combines the deterministic raw-frame and protocol packet-socket regressions with the canonical user-network QEMU end-to-end path, while `make test-network` additionally includes the host platform and raw ABI suites.
 
 `make test-build` first runs the pinned network-feasibility manifest and compiler-helper regression without downloading or compiling external SSH sources.
 
@@ -175,3 +178,23 @@ The deterministic peer verifies:
 The peer protocol and QEMU monitor operations have explicit deadlines, so a stuck device path fails the test instead of hanging the suite.
 
 Successful runs delete stale Phase C failure artifacts and leave no new captures or debug-console logs behind.
+
+## ARP and ICMP QEMU Acceptance
+
+`tests/network_phase_d.py` uses the shared QEMU packet-socket framing helpers and an isolated debug image to exercise the production NE2000 driver and application-linked protocol stack.
+
+The controlled peer requires an exact broadcast ARP Request and four valid outbound Echo Requests from `ping.bin`, including source and destination addresses, checksums, length fields, and zero Ethernet padding.
+
+Before accepting the first Echo Reply, the peer injects bad IPv4 and ICMP checksums, impossible and truncated declared lengths, a fragment, an unsupported EtherType, unrelated Echo Replies, and an unsolicited ARP Reply.
+
+A following ARP Request is used as a receive-order barrier, proving those rejected frames were processed before a valid padded Echo Reply is sent.
+
+The peer then checks that subsequent Echo Requests reuse the original gateway MAC without a second ARP Request.
+
+The strict-C90 `test_net_protocol.bin` guest probe separately checks cache expiry and re-resolution, answers inbound ARP and Echo Requests while actively polling, reports bounded ARP and Echo timeouts against a silent peer, and returns to the shell after keyboard cancellation.
+
+A second QEMU instance uses the documented user-network backend and requires four successful Ping replies from `10.0.2.2`, zero loss, a usable shell, and an intact image.
+
+The peer tests do not establish ARP authentication or an idle-shell Echo server, neither of which is provided by the current stack.
+
+Failure packet captures and debug-console logs are retained under `build/test-artifacts/`, while successful runs remove their temporary artifacts.

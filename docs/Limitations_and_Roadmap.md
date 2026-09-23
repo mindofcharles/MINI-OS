@@ -17,7 +17,7 @@ This file documents current limitations only.
 - The monotonic clock is a wrapping 32-bit elapsed-time source with approximately one-millisecond PIT resolution, not a wall clock.
 - Secure random bytes require CPUID-advertised RDRAND and return unavailable without a fallback on older CPUs.
 - A polling NE2000 raw-frame driver, static IPv4 configuration, Ethernet II framing, ARP, restricted IPv4 packet processing, ICMP Echo, and a strict-C90 `ping` application exist; UDP, TCP, DNS, DHCP, and SSH applications do not.
-- The IPv4 implementation rejects options and fragments, does not reassemble datagrams or process ICMP errors, and responds to Echo Requests only while a network application polls; ARP and ICMP have deterministic host coverage but not yet a QEMU protocol acceptance test.
+- The IPv4 implementation rejects options and fragments, does not reassemble datagrams or process ICMP errors, and responds to Echo Requests only while a network application polls; ARP and ICMP have both deterministic host tests and QEMU protocol acceptance.
 - ARP has no authentication, and address-conflict probing and defense are not implemented.
 
 ## Filesystem And Storage
@@ -50,7 +50,7 @@ This file documents current limitations only.
 
 ## Testing And Tooling
 
-- Automated QEMU tests cover insufficient-memory and A20 failures, normalized exceptions, PIC/IRQ startup invariants, PIT progress, positive and unavailable RDRAND paths, positive and deliberately corrupted memory-canary paths, NE2000 identification, exact raw-frame boundaries, receive-ring wrap, capacity drops, timeout/overrun recovery, library assertions, multi-block file I/O, append/move/remove behavior, persistence, deterministic ATA read/write faults, partial-write exhaustion, wrong-device refusal, three forced-CHS geometries, default PC, and `isapc`.
+- Automated QEMU tests cover insufficient-memory and A20 failures, normalized exceptions, PIC/IRQ startup invariants, PIT progress, positive and unavailable RDRAND paths, positive and deliberately corrupted memory-canary paths, NE2000 identification, exact raw-frame boundaries, receive-ring wrap, capacity drops, timeout/overrun recovery, ARP/ICMP protocol exchange and gateway Ping, library assertions, multi-block file I/O, append/move/remove behavior, persistence, deterministic ATA read/write faults, partial-write exhaustion, wrong-device refusal, three forced-CHS geometries, default PC, and `isapc`.
 - Automated build tests cover deterministic platform isolation, timeout wrap behavior, marker absence, layout overlap and invalid firmware/configured-memory boundaries, strict-C90 application and modern-C library separation, per-application network/SSH dependencies, all parameterized `elf2bin` capacities, exact-limit and overflowing images, relevant dependency rebuilds, no-op builds, both flat-binary link paths, dirty-image rejection, every host-injector sector-write failure point before and after flush, and every final transaction stage including the full pre-rename integrity gate.
 - Physical-machine compatibility remains unverified because firmware USB-to-legacy-ATA mapping varies and cannot be established by emulator coverage.
 

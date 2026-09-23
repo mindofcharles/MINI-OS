@@ -27,6 +27,7 @@ The implemented path is end-to-end:
 - Filesystem design idea draft: `docs/DIY-FS.md`
 - System call ABI: `docs/Syscall_ABI.md`
 - Raw Ethernet transport: `docs/Network_Raw_Transport.md`
+- Ethernet, ARP, IPv4, and ICMP Echo: `docs/Network_Stack.md`
 - Runtime support matrix: `docs/Library_Support.md`
 - Automated tests: `docs/Testing.md`
 - Real hardware guide: `docs/Real_Hardware_Guide.md`
@@ -42,5 +43,6 @@ The implemented path is end-to-end:
 | `banner.c` | renders text with a 5-by-5 glyph table |
 | `vedit.c` | full-screen text editor using file and cursor syscalls |
 | `netdiag.c` | reports NE2000 state, configuration, frame bounds, and counters |
+| `ping.c` | sends four bounded ICMP Echo Requests to a numeric IPv4 address |
 
 These binaries are trusted Ring 0 programs in the kernel address space; the loader is not a process-isolation boundary.

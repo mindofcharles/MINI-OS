@@ -132,6 +132,8 @@ The strict-C90 diagnostic can be run after `make run-network`:
 run /transport/build/apps/netdiag.bin
 ```
 
+The strict-C90 Ping application can reach the QEMU user-network router with `run /transport/build/apps/ping.bin 10.0.2.2`, and its implemented protocol subset is documented in [`Network_Stack.md`](Network_Stack.md).
+
 The current secure-random syscall requires the advertised RDRAND feature. `make run-network` provides the accepted positive emulator configuration, while CPUs without that feature receive an explicit unavailable error and never fall back to the runtime `rand()` generator.
 
 The explicit IDE index is part of the current driver contract because protected-mode filesystem I/O addresses the primary ATA channel's master device directly after the BIOS loads the kernel.
@@ -166,7 +168,7 @@ The layout checker, runtime, and application targets also depend on the raw-fram
 
 The final image depends on every non-generated file and directory injected from `transport/`, so changing, adding, or removing an unlinked source or document still refreshes the in-image tree without rebuilding unrelated binaries.
 
-Ordinary applications link only `crt0` and `minilibc`; `netdiag` and the raw-network executable test add the modern-C raw, platform, and time objects plus compiler helpers; `ping`, `netcat`, and `ssh` additionally add the IPv4 protocol group; and only `ssh` adds the modern-C SSH objects.
+Ordinary applications link only `crt0` and `minilibc`; `netdiag` and the raw-network executable test add the modern-C raw, platform, and time objects plus compiler helpers; `ping`, `netcat`, `ssh`, and the guest protocol test additionally add the IPv4 protocol group; and only `ssh` adds the modern-C SSH objects.
 
 The Makefile itself is also an input to generated tools, objects, binaries, and the final image, so flag or recipe changes trigger the required rebuild.
 
@@ -192,6 +194,7 @@ make check-image  # verify the current generated image
 make network-phase0-check  # verify pinned network-probe policy without external sources
 make test-network-abi  # verify every public raw-frame structure offset
 make test-network-driver  # exercise NE2000 frames, ring wrap, and recovery in QEMU
+make test-network-d6  # accept ARP, ICMP Echo, timeout, cancellation, and gateway Ping in QEMU
 make test-network-qemu  # run packet-socket and canonical user-network QEMU checks
 make test-network  # run all host, ABI, and QEMU network checks
 make test-build   # build policy, corruption rejection, and host write-fault transaction checks

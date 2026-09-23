@@ -4,7 +4,7 @@ Network-library implementations compile as modern C with fatal project warnings,
 
 The base object group contains `raw.c`, `platform.c`, and `time.c` and is linked into raw-frame consumers such as `netdiag` and `test_network` as well as higher-level network applications.
 
-The IPv4 object group is separate and is linked only into `ping`, `netcat`, and `ssh`, so raw diagnostics do not acquire application-protocol state or code.
+The IPv4 object group is separate and is linked into `ping`, `netcat`, `ssh`, and the strict-C90 `test_net_protocol` guest probe, so raw diagnostics do not acquire application-protocol state or code.
 
 The build rejects a network source that is missing from both groups, appears in both groups, or is named by a group but absent from the source tree.
 
@@ -28,6 +28,6 @@ The polling loop dispatches validated unfragmented IPv4 datagrams to ICMP Echo, 
 
 The IPv4 and ICMP parsers use declared protocol lengths rather than Ethernet padding, reject unsupported options and fragments, and keep protocol state in the application-owned context.
 
-The `ping` application is strict C90, while `ipv4.c`, `icmp.c`, and `poll.c` are modern C; QEMU protocol acceptance remains separate from the deterministic host tests.
+The `ping` application and guest protocol probe are strict C90, while `ipv4.c`, `icmp.c`, and `poll.c` are modern C; both deterministic host tests and QEMU protocol acceptance cover the implemented stack.
 
 ARP learning is unauthenticated, so a matching solicited reply reduces accidental or unsolicited cache changes but does not establish peer identity; address-conflict defense is not implemented.

@@ -6,7 +6,7 @@ MINI-OS currently provides a polling NE2000-compatible driver and three system c
 
 This transport is the hardware boundary for modern-C protocol code and does not itself classify Ethernet frames or implement ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, or SSH.
 
-The separately linked application network library contains Ethernet II framing, ARP, restricted IPv4 packet processing, and ICMP Echo; UDP, TCP, DHCP, DNS, and SSH remain unimplemented.
+The separately linked application network library contains Ethernet II framing, ARP, restricted IPv4 packet processing, and ICMP Echo as described in [`Network_Stack.md`](Network_Stack.md); UDP, TCP, DHCP, DNS, and SSH remain unimplemented.
 
 ## Device Contract
 
@@ -117,9 +117,11 @@ run /transport/build/apps/netdiag.bin
 
 `make test-network-driver` connects QEMU's NE2000 device to a deterministic host Ethernet peer and verifies exact 60-, 61-, and 1,514-byte transmissions, an exact 61-byte reception, immediate caller-buffer reuse, capacity-drop consumption, two receive-ring wraps, unavailable and wrong-base behavior, synthetic overrun recovery, DMA timeout recovery, transmit timeout recovery, an exact post-recovery transmission, stable reset-timeout failure, stable counters, and continued shell operation.
 
-`make test-network-qemu` combines the deterministic packet-socket regression with the canonical user-network QEMU path, and `make test-network` additionally includes the host platform and raw ABI checks.
+`make test-network-d6` checks complete ARP and ICMP packet exchanges, malformed-frame rejection, cache reuse and expiry, inbound replies, timeouts, cancellation, and Ping to the QEMU user-network router.
 
-Packet captures and debug-console logs live in the temporary test directory during successful runs and are copied to `build/test-artifacts/` with a `-failure` suffix only when the Phase C regression fails.
+`make test-network-qemu` combines the deterministic raw-frame and protocol packet-socket regressions with the canonical user-network QEMU path, and `make test-network` additionally includes the host platform and raw ABI checks.
+
+Packet captures and debug-console logs live in temporary test directories during successful runs and are copied to `build/test-artifacts/` with a `-failure` suffix only when a QEMU network regression fails.
 
 ## Implementation References
 

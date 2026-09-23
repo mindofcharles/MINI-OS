@@ -71,8 +71,8 @@ NET_BASE_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_BASE
 NET_PHASE_D2_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_PHASE_D2_LIB_SRCS))
 NET_IPV4_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_IPV4_LIB_SRCS))
 SSH_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(SSH_LIB_SRCS))
-NETWORK_BASE_APP_NAMES := netdiag ping netcat ssh test_network
-NETWORK_IPV4_APP_NAMES := ping netcat ssh
+NETWORK_BASE_APP_NAMES := netdiag ping netcat ssh test_network test_net_protocol
+NETWORK_IPV4_APP_NAMES := ping netcat ssh test_net_protocol
 SSH_APP_NAMES := ssh
 
 app_component_objects = $(strip $(if $(filter $(NETWORK_BASE_APP_NAMES),$(notdir $(1))),$(COMPILER_RT_OBJ) $(NET_BASE_LIB_OBJS)) $(if $(filter $(NETWORK_IPV4_APP_NAMES),$(notdir $(1))),$(NET_IPV4_LIB_OBJS)) $(if $(filter $(SSH_APP_NAMES),$(notdir $(1))),$(SSH_LIB_OBJS)))
@@ -130,7 +130,7 @@ ELF2BIN_MAX_SECTIONS ?= 4096
 ELF2BIN_MAX_RELOCATIONS ?= 32768
 QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
 
-.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-d3 test-network-d4 test-network-d5 test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe transport-inputs-force
+.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-d3 test-network-d4 test-network-d5 test-network-d6 test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe transport-inputs-force
 
 all: check-layout $(OS_IMG)
 
@@ -346,7 +346,10 @@ test-network-abi: $(NETWORK_PHASE_C_ABI_TEST_BIN)
 test-network-driver: $(OS_IMG) $(CHECK_TOOL)
 	$(PYTHON) tests/network_phase_c.py --image $(OS_IMG)
 
-test-network-qemu: test-network-driver test-e2e
+test-network-d6: $(OS_IMG) $(CHECK_TOOL)
+	$(PYTHON) tests/network_phase_d.py --image $(OS_IMG)
+
+test-network-qemu: test-network-driver test-network-d6 test-e2e
 
 test-network: test-network-host test-network-abi test-network-qemu
 

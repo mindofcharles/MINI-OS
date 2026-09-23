@@ -145,7 +145,7 @@ run hello.bin
 
 The strict-C90 `ping.bin` application accepts one numeric IPv4 address, sends four bounded ICMP Echo Requests using static address `10.0.2.15/24` and gateway `10.0.2.2`, and prints each result plus a summary.
 
-With the supported QEMU network device configured, run it from the applications directory as `run ping.bin 10.0.2.2`; the existing automated QEMU network regression checks raw frames, while protocol-level Ping acceptance is not yet part of that regression.
+With the supported QEMU network device configured, run it from the applications directory as `run ping.bin 10.0.2.2`; the automated network regression checks both raw-frame transport and protocol-level Ping acceptance.
 
 Example session 2 (File manipulation):
 
