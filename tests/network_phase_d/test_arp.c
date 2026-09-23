@@ -785,8 +785,8 @@ static int test_poll_idle_and_ipv4(void)
     net_write_be16(frame + 12U, NET_ETHERTYPE_IPV4);
     if (!queue_frame(frame) ||
         !require(net_poll(0U) == 0 &&
-                     net_global_context.counters.unsupported_frames == 1U,
-                 "D4 consumes IPv4 without claiming handler work") ||
+                     net_global_context.counters.malformed_frames == 1U,
+                 "IPv4 handler rejects an empty header") ||
         !require(net_poll(0U) == 0, "zero-time idle poll")) {
         return 0;
     }

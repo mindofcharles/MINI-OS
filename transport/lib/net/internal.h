@@ -50,6 +50,7 @@ struct net_pending_echo {
     struct net_ipv4_addr reply_source;
     const net_u8 *payload;
     net_u32 started_ms;
+    net_u32 sent_ms;
     net_u32 timeout_ms;
     net_u32 elapsed_ms;
     unsigned int payload_length;
@@ -78,6 +79,7 @@ struct net_context {
     struct net_pending_echo pending_echo;
     struct net_protocol_counters counters;
     net_u32 arp_last_request_ms;
+    net_u16 next_echo_identifier;
     int arp_request_seen;
     int initialized;
     int tx_prepared;

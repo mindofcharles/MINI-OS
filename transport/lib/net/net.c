@@ -1,6 +1,7 @@
 #include "internal.h"
 
 #include "address.h"
+#include "net_platform.h"
 
 #include <string.h>
 
@@ -74,6 +75,8 @@ int net_init(const struct net_config *config)
     net_global_context.config = committed_config;
     memcpy(net_global_context.device_mac.octets, info.mac,
            sizeof(net_global_context.device_mac.octets));
+    net_global_context.next_echo_identifier =
+        (net_u16)net_clock_now_ms();
     net_global_context.initialized = 1;
     return 0;
 }

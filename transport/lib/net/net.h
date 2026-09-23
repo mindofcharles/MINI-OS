@@ -70,7 +70,9 @@ int net_resolve_arp(const struct net_ipv4_addr *address,
 /*
  * Sequence must fit 16 bits, payload length must not exceed the public
  * maximum, payload may be null only at zero length, and result must be
- * nonnull.
+ * nonnull.  One deadline includes ARP resolution and Echo waiting.  The
+ * reported elapsed time begins when Echo is sent; result is unchanged on
+ * failure.
  */
 int net_ping(const struct net_ipv4_addr *address,
              unsigned int sequence,

@@ -6,7 +6,7 @@ MINI-OS currently provides a polling NE2000-compatible driver and three system c
 
 This transport is the hardware boundary for modern-C protocol code and does not itself classify Ethernet frames or implement ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, or SSH.
 
-The separately linked application network library contains Ethernet II framing and host-tested ARP parsing, caching, replies, and bounded resolution; IPv4 packet and higher-layer protocol processing remain unimplemented.
+The separately linked application network library contains Ethernet II framing, ARP, restricted IPv4 packet processing, and ICMP Echo; UDP, TCP, DHCP, DNS, and SSH remain unimplemented.
 
 ## Device Contract
 

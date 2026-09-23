@@ -16,8 +16,9 @@ This file documents current limitations only.
 - Only PIT IRQ0 is unmasked; the NE2000 transport deliberately polls with its configured IRQ9 masked, and device IRQ handling beyond the timer is not enabled.
 - The monotonic clock is a wrapping 32-bit elapsed-time source with approximately one-millisecond PIT resolution, not a wall clock.
 - Secure random bytes require CPUID-advertised RDRAND and return unavailable without a fallback on older CPUs.
-- A polling NE2000 raw-frame driver, static IPv4 configuration, Ethernet II framing, and host-tested ARP parsing, caching, resolution, and polling exist, but no IPv4 packet processing, ICMP, UDP, TCP, DNS, DHCP, or SSH application exists yet.
-- ARP has no authentication, and address-conflict probing and defense are not implemented; Phase D4 ARP behavior has deterministic host coverage but not yet a QEMU protocol acceptance test.
+- A polling NE2000 raw-frame driver, static IPv4 configuration, Ethernet II framing, ARP, restricted IPv4 packet processing, ICMP Echo, and a strict-C90 `ping` application exist; UDP, TCP, DNS, DHCP, and SSH applications do not.
+- The IPv4 implementation rejects options and fragments, does not reassemble datagrams or process ICMP errors, and responds to Echo Requests only while a network application polls; ARP and ICMP have deterministic host coverage but not yet a QEMU protocol acceptance test.
+- ARP has no authentication, and address-conflict probing and defense are not implemented.
 
 ## Filesystem And Storage
 

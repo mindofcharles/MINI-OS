@@ -1059,6 +1059,8 @@ def verify_per_application_libraries(repo: Path) -> None:
         "transport/lib/net/checksum.c",
         "transport/lib/net/ethernet.c",
         "transport/lib/net/arp.c",
+        "transport/lib/net/ipv4.c",
+        "transport/lib/net/icmp.c",
         "transport/lib/net/poll.c",
     ]
     ping_source = repo / "transport/apps/ping.c"

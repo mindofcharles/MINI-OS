@@ -11,6 +11,7 @@ make test-network-d1
 make test-network-d2
 make test-network-d3
 make test-network-d4
+make test-network-d5
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -22,7 +23,7 @@ make test
 
 `make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs the host network, raw ABI, build-policy, deterministic NE2000, and general QEMU end-to-end regressions.
 
-`make test-network-host` compiles the application-level network header under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, receive-queue, byte-order, checksum, address, configuration, initialization, Ethernet, ARP, and polling regressions without linking the production syscall adapter.
+`make test-network-host` compiles the application-level network header and `ping.c` under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, receive-queue, byte-order, checksum, address, configuration, initialization, Ethernet, ARP, IPv4, ICMP Echo, and polling regressions without linking the production syscall adapter into host tests.
 
 `make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the deterministic Phase D backend regression.
 
@@ -37,6 +38,10 @@ It target-compiles the current IPv4-group sources as modern C with fatal warning
 `make test-network-d4` checks ARP fixed-field and truncation rejection, request and probe replies, matching and unrelated replies, cache insertion/replacement/expiry, retry spacing, cross-call request throttling, wrap-safe deadlines, static next-hop selection, raw-device failures, cancellation, and unchanged resolver output on failure.
 
 It also target-compiles the current IPv4-group sources as modern C with fatal warnings; the D4 host test does not claim QEMU ARP or ICMP acceptance.
+
+`make test-network-d5` verifies IPv4 and ICMP truncation boundaries, header and message checksums, exact payload lengths without Ethernet padding, fragment and option rejection, Echo Request replies, maximum payload transmission, full Echo Reply matching, off-link routing, shared ARP/Echo deadlines, zero timeout, cancellation, and clock wrap.
+
+It target-compiles the network library as modern C with fatal warnings and builds `ping.c` as a strict-C90 application; QEMU ARP and ICMP protocol acceptance remains a separate regression.
 
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 

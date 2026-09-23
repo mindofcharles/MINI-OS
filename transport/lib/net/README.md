@@ -24,6 +24,10 @@ Stage D4 provides private Ethernet/IPv4 ARP parsing, request and reply construct
 
 The Ethernet receive view includes the complete data field, including padding, while the ARP parser consumes only its validated 28-byte message.
 
-The polling loop currently processes ARP only; IPv4 datagrams and ICMP Echo remain unimplemented until the next stage.
+The polling loop dispatches validated unfragmented IPv4 datagrams to ICMP Echo, and `net_ping` resolves the next hop and waits for a fully matched reply within one overall deadline.
+
+The IPv4 and ICMP parsers use declared protocol lengths rather than Ethernet padding, reject unsupported options and fragments, and keep protocol state in the application-owned context.
+
+The `ping` application is strict C90, while `ipv4.c`, `icmp.c`, and `poll.c` are modern C; QEMU protocol acceptance remains separate from the deterministic host tests.
 
 ARP learning is unauthenticated, so a matching solicited reply reduces accidental or unsolicited cache changes but does not establish peer identity; address-conflict defense is not implemented.
