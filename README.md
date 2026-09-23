@@ -7,6 +7,9 @@ MINI-OS supports running strict C90 programs with dynamic memory allocation and 
 > [!NOTE]
 > MINI-OS is only an experimental system and is far from perfect.
 
+> [!TIP]
+> This project is currently primarily experimental, and most development is carried out locally. Consequently, commits may be pushed at irregular intervals. Once a sufficient number of local changes have accumulated, I usually organize and consolidate them before pushing them to the repository.
+
 Thanks to Gemini, Gork, GPT, and Mistral for their support.
 
 The documentation and some comments were written by Gemini and GPT. A small part of the code was developed in collaboration with Gemini and GPT.

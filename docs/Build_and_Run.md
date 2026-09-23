@@ -102,7 +102,7 @@ The deterministic network regressions run entirely on the host and do not requir
 make test-network-host
 ```
 
-This target creates `build/network-phase-b/platform_test`, compiles the application-level network header under strict C90, and creates Phase D host binaries for the test-only raw device, byte-order and checksum primitives, canonical IPv4 configuration, transactional stack initialization, and Ethernet framing.
+This target creates `build/network-phase-b/platform_test`, compiles the application-level network header under strict C90, and creates Phase D host binaries for the test-only raw device, byte-order and checksum primitives, canonical IPv4 configuration, transactional stack initialization, Ethernet framing, ARP, and polling.
 
 Both test-only markers are checked for absence from `build/mini_os.img` by the build regression.
 

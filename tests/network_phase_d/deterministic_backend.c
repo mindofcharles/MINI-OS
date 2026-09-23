@@ -7,6 +7,7 @@
 struct backend_frame {
     unsigned char data[NET_FRAME_MAX];
     unsigned int length;
+    unsigned int time_ms;
 };
 
 struct backend_receive_event {
@@ -23,6 +24,7 @@ static unsigned int transmit_count;
 static unsigned int receive_head;
 static unsigned int receive_count;
 static unsigned int fake_clock;
+static unsigned int receive_clock_step;
 static unsigned int fake_random_state;
 static int forced_cancelled;
 static int next_info_error;
@@ -61,6 +63,7 @@ void phase_d_backend_reset(void)
     receive_head = 0U;
     receive_count = 0U;
     fake_clock = 0U;
+    receive_clock_step = 0U;
     fake_random_state = 0x4D494E49U;
     forced_cancelled = 0;
     next_info_error = 0;
@@ -84,6 +87,11 @@ void phase_d_backend_clock_set(unsigned int milliseconds)
 void phase_d_backend_clock_advance(unsigned int milliseconds)
 {
     fake_clock += milliseconds;
+}
+
+void phase_d_backend_set_receive_clock_step(unsigned int milliseconds)
+{
+    receive_clock_step = milliseconds;
 }
 
 void phase_d_backend_random_seed(unsigned int seed)
@@ -202,6 +210,14 @@ const unsigned char *phase_d_backend_transmit_frame(unsigned int index)
     return transmitted[index].data;
 }
 
+unsigned int phase_d_backend_transmit_time(unsigned int index)
+{
+    if (index >= transmit_count) {
+        return 0U;
+    }
+    return transmitted[index].time_ms;
+}
+
 int net_get_info(struct net_device_info *info)
 {
     int error;
@@ -241,6 +257,7 @@ int net_send_frame(const void *frame, unsigned int length)
     }
     memcpy(transmitted[transmit_count].data, frame, length);
     transmitted[transmit_count].length = length;
+    transmitted[transmit_count].time_ms = fake_clock;
     ++transmit_count;
     return forced_result_set ? forced_result : (int)length;
 }
@@ -256,6 +273,7 @@ int net_recv_frame(void *frame, unsigned int capacity)
     if (capacity > NET_FRAME_MAX) {
         return SYS_ERR_RANGE;
     }
+    fake_clock += receive_clock_step;
     if (receive_count == 0U) {
         return 0;
     }

@@ -1,6 +1,6 @@
 # Network
 
-Current status: Phase 0 and Phases A through C are complete. Phase D is in progress: D1 through D3 are complete, and D4 is next.
+Current status: Phase 0 and Phases A through C are complete. Phase D is in progress: D1 through D4 are complete, and D5 is next.
 
 - Phase 0: select and measure the SSH and cryptographic libraries. Complete.
 
@@ -10,7 +10,7 @@ Current status: Phase 0 and Phases A through C are complete. Phase D is in progr
 
 - Phase C: implement the polling NE2000 raw-frame transport. Complete.
 
-- Phase D: implement Ethernet, ARP, static IPv4, and ICMP. D1 interfaces and test foundations, D2 primitives and initialization, and D3 Ethernet framing and classification are complete; D4 ARP is next.
+- Phase D: implement Ethernet, ARP, static IPv4, and ICMP. D1 interfaces and tests, D2 primitives and initialization, D3 Ethernet framing, and D4 ARP resolution and polling are complete; D5 IPv4/ICMP and D6 QEMU protocol acceptance remain.
 
 - Phase E: implement one active TCP connection and `netcat`. Planned.
 

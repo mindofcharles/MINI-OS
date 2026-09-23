@@ -20,6 +20,10 @@ Stage D2 provides alignment-safe network-byte-order helpers, the Internet checks
 
 Stage D3 provides private Ethernet II frame construction and classification, destination and source validation, explicit zero padding, normalized-frame length checks, and deterministic host tests.
 
-The Ethernet receive view includes the complete data field, including padding, so later protocol parsers must validate their own logical lengths.
+Stage D4 provides private Ethernet/IPv4 ARP parsing, request and reply construction, a four-entry expiring cache, bounded retry and request throttling, on-link resolution, static next-hop selection, and the public `net_poll` service loop.
 
-ARP, IPv4, and ICMP packet processing and the public polling API are not implemented yet.
+The Ethernet receive view includes the complete data field, including padding, while the ARP parser consumes only its validated 28-byte message.
+
+The polling loop currently processes ARP only; IPv4 datagrams and ICMP Echo remain unimplemented until the next stage.
+
+ARP learning is unauthenticated, so a matching solicited reply reduces accidental or unsolicited cache changes but does not establish peer identity; address-conflict defense is not implemented.

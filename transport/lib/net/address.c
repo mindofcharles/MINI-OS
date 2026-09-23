@@ -32,6 +32,55 @@ static int netmask_is_supported(net_u32 mask)
     return (host_mask & (host_mask + 1U)) == 0U;
 }
 
+int net_ipv4_is_on_link_peer(const struct net_config *config,
+                             const struct net_ipv4_addr *address)
+{
+    net_u32 mask;
+    net_u32 value;
+    net_u32 local;
+
+    if (config == 0 || address == 0) {
+        return 0;
+    }
+    mask = ipv4_value(&config->netmask);
+    value = ipv4_value(address);
+    local = ipv4_value(&config->address);
+    return value != local &&
+           (value & mask) == (local & mask) &&
+           ipv4_is_usable_unicast(value, mask);
+}
+
+int net_ipv4_select_next_hop(const struct net_config *config,
+                              const struct net_ipv4_addr *destination,
+                              struct net_ipv4_addr *next_hop)
+{
+    net_u32 value;
+    net_u8 first;
+    net_u32 mask;
+    net_u32 local;
+
+    if (config == 0 || destination == 0 || next_hop == 0) {
+        return NET_ERR_INVALID;
+    }
+    value = ipv4_value(destination);
+    first = destination->octets[0];
+    mask = ipv4_value(&config->netmask);
+    local = ipv4_value(&config->address);
+    if (first == 0U || first == 127U || first >= 224U ||
+        value == local) {
+        return NET_ERR_NO_ROUTE;
+    }
+    if ((value & mask) == (local & mask)) {
+        if (!ipv4_is_usable_unicast(value, mask)) {
+            return NET_ERR_NO_ROUTE;
+        }
+        *next_hop = *destination;
+    } else {
+        *next_hop = config->gateway;
+    }
+    return 0;
+}
+
 int net_ipv4_parse(const char *text, struct net_ipv4_addr *address)
 {
     struct net_ipv4_addr parsed;

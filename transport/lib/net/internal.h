@@ -77,8 +77,11 @@ struct net_context {
     struct net_pending_arp pending_arp;
     struct net_pending_echo pending_echo;
     struct net_protocol_counters counters;
+    net_u32 arp_last_request_ms;
+    int arp_request_seen;
     int initialized;
     int tx_prepared;
+    int service_active;
 };
 
 extern struct net_context net_global_context;

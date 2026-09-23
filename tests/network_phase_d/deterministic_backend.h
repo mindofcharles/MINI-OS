@@ -12,6 +12,7 @@ const char *phase_d_backend_marker(void);
 
 void phase_d_backend_clock_set(unsigned int milliseconds);
 void phase_d_backend_clock_advance(unsigned int milliseconds);
+void phase_d_backend_set_receive_clock_step(unsigned int milliseconds);
 void phase_d_backend_random_seed(unsigned int seed);
 void phase_d_backend_set_cancelled(int cancelled);
 
@@ -28,5 +29,6 @@ void phase_d_backend_clear_transmits(void);
 unsigned int phase_d_backend_transmit_count(void);
 unsigned int phase_d_backend_transmit_length(unsigned int index);
 const unsigned char *phase_d_backend_transmit_frame(unsigned int index);
+unsigned int phase_d_backend_transmit_time(unsigned int index);
 
 #endif
