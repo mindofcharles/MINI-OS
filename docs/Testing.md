@@ -13,6 +13,9 @@ make test-network-d3
 make test-network-d4
 make test-network-d5
 make test-network-d6
+make test-network-e1
+make test-network-sanitizers
+make test-network-e1-qemu
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -22,11 +25,13 @@ make test-build
 make test
 ```
 
-`make` first checks the platform memory layout and then runs the read-only image checker after host injection. `make test` runs the host network, raw ABI, build-policy, deterministic NE2000, ARP/ICMP protocol, and general QEMU end-to-end regressions.
+`make` first checks the platform memory layout and then runs the read-only image checker after host injection.
 
-`make test-network-host` compiles the application-level network header and `ping.c` under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, receive-queue, byte-order, checksum, address, configuration, initialization, Ethernet, ARP, IPv4, ICMP Echo, and polling regressions without linking the production syscall adapter into host tests.
+`make test` runs the host network, TCP-foundation sanitizer, raw ABI, build-policy, deterministic NE2000, ARP/ICMP protocol, TCP-contract guest, and general QEMU end-to-end regressions.
 
-`make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the deterministic Phase D backend regression.
+`make test-network-host` compiles the application-level network and TCP headers plus `ping.c` under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, receive-queue, byte-order, checksum, address, configuration, initialization, Ethernet, ARP, IPv4, ICMP Echo, polling, and TCP-foundation regressions without linking the production syscall adapter into host tests.
+
+`make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the Phase D regression against the shared deterministic backend.
 
 `make test-network-d2` tests unaligned network-byte-order access, even, odd, empty, corrupted, and maximum-frame checksums, canonical IPv4 text parsing, supported static subnets, timing bounds, device-contract validation, one-time initialization, and failure atomicity.
 
@@ -46,15 +51,37 @@ It target-compiles the network library as modern C with fatal warnings and build
 
 `make test-network-d6` checks exact ARP and ICMP wire packets through the production NE2000 driver, malformed and unrelated reply rejection, cache reuse and expiry, active inbound replies, bounded ARP and Echo timeouts, keyboard cancellation, and four successful Ping replies from the QEMU user-network router.
 
+`make test-network-e1` runs the host suite and target-compiles the modern-C TCP and shared-clear groups plus the strict-C90 guest contract probe.
+
+`make test-network-sanitizers` builds and runs the complete implemented TCP-foundation host closure with AddressSanitizer and UndefinedBehaviorSanitizer, including the shared Ethernet, ARP, IPv4, and polling service rather than only a codec.
+
+It fails when the sanitizer build or runtime is unavailable instead of silently skipping coverage.
+
+`make test-network-e1-qemu` runs the public-contract guest probe twice on each RDRAND-on and RDRAND-off CPU configuration, requires a guarded shell return, and checks the temporary images.
+
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 
 `make test-network-driver` runs a deterministic Ethernet peer against QEMU's NE2000 model and retains packet captures plus debug-console logs under `build/test-artifacts/` only when the regression fails.
 
-`make test-network-qemu` combines the deterministic raw-frame and protocol packet-socket regressions with the canonical user-network QEMU end-to-end path, while `make test-network` additionally includes the host platform and raw ABI suites.
+`make test-network-qemu` combines the deterministic raw-frame and protocol packet-socket regressions, TCP-foundation guest probe, and canonical QEMU end-to-end path, while `make test-network` additionally includes the host, sanitizer, and raw ABI suites.
 
 `make test-build` first runs the pinned network-feasibility manifest and compiler-helper regression without downloading or compiling external SSH sources.
 
 Tests require Python 3.9 or newer and `qemu-system-i386` in addition to the normal build tools.
+
+## Shared Network Host Backend
+
+`tests/network_common/deterministic_backend.c` and its header provide the shared host-only backend, while phase-specific assertions remain in their own test directories.
+
+The `network_test_backend_*` controls provide deterministic device state, bounded transmit capture, scheduled receive/error events, wrapping time with optional clock-read advancement, random failure and short-fill injection, cancellation, and fake idle advancement.
+
+The Makefile selects this backend explicitly for the relevant host and sanitizer tests without replacing any production adapter.
+
+The build regression requires one shared test-only marker in both the D backend test and E foundation test and rejects that marker from the production image.
+
+It also checks that a shared-header change schedules every consuming host and sanitizer executable for rebuilding without changing source timestamps.
+
+These controls are not application APIs, and deterministic randomness or fake idle success does not establish production security or target wakeup behavior.
 
 ## Image Integrity Gate
 
@@ -126,7 +153,7 @@ It boots and asserts:
 - dependency and boundary proof that the layout checker reserves a private alignment byte beyond the shared maximum raw-frame length;
 - a binary-level assertion that the kernel image starts with an executable jump whose destination lies inside the image;
 - GNU C11 compilation of `transport/lib` and strict C90 flags for apps/tests;
-- strict-C90 parsing of the platform, network-platform, raw-frame, and application-level network public headers;
+- strict-C90 parsing of the platform, network-platform, raw-frame, application-level network, and TCP public headers;
 - exact size and field-offset agreement for the versioned raw-network information structure;
 - deterministic host checks for wrapping elapsed time, maximum duration, delayed polling, callback cancellation, fake random state, device information, copied transmission, queued reception, and injected transport errors;
 - binary proof that the deterministic platform and packet-backend markers exist only in their test executables and are absent from the production image;
@@ -148,11 +175,14 @@ It boots and asserts:
 - rejection of 512 KiB plus one byte, overflowing BSS placement, and unresolved-strong-symbol layouts;
 - rejection of missing, duplicate, or nonexistent network source-group assignments;
 - proof that ordinary applications acquire no network objects, raw network applications acquire only the base group, IPv4 applications acquire the separately selected modern-C protocol group and compiler helpers under both linkers, the fixed network context remains within a bounded BSS allocation, and only the SSH application acquires SSH objects;
+- proof that only TCP-selected consumers acquire the bounded TCP context and shared clearing object, with neither present in raw-only or ICMP-only application dependencies;
 - a no-op incremental build;
-- transport-tree reinjection after an unlinked source changes, without rebuilding unrelated binaries;
+- manifest-only transport-tree reinjection after a non-build document changes, with unchanged timestamps and SHA-256 hashes for the boot/kernel binaries, runtime objects, all application/library objects, and every existing application/guest binary;
+- a negative control that removes only the image's manifest prerequisite and requires the changed document to remain uninjected, followed by successful normal reinjection and a no-op incremental build;
 - runtime-header and kernel-include dependency rebuilding;
 - a clean build with `ld.lld` unavailable, forcing `elf2bin`;
 - QEMU BSS and application-stack smoke boots for both flat-binary producers.
+- repeated public TCP-contract guest execution under both flat-binary producers and both entropy-capable and entropy-unavailable CPU configurations.
 
 Temporary repositories, images, logs, and debug kernels are removed when the test finishes.
 
@@ -198,3 +228,23 @@ A second QEMU instance uses the documented user-network backend and requires fou
 The peer tests do not establish ARP authentication or an idle-shell Echo server, neither of which is provided by the current stack.
 
 Failure packet captures and debug-console logs are retained under `build/test-artifacts/`, while successful runs remove their temporary artifacts.
+
+## TCP Foundation Validation
+
+The deterministic foundation test uses explicitly private lifecycle fixtures, not a production handshake, and verifies generation exhaustion without wrap, stale-handle rejection, stable terminal results, busy-before-release, final disable, and instance-secret clearing.
+
+It tests positive-prefix reporting followed by direct or poll-driven failure, zero-timeout close retention, ordinary close-call timeout without abort, an unchanged close-grace deadline across repeated calls and clock wrap, unread-data protection, and drained EOF before successful terminal release.
+
+Owned ARP tests preserve original task budgets across repeated starts and poll-call expiry, verify delayed replies, cache expiry and a newly validated MAC, retry exhaustion, initial-throttle deadline expiry, one-shot cancellation, and rejection of stale generations.
+
+Clock-read advancement tests cross the deadline during ARP startup, require both synchronous resolution and Ping to leave no active task or changed failure output, and prove that later polling and fresh wire resolution still succeed.
+
+They cover clock wrap and an existing TCP lifecycle record without making an ordinary operation timeout terminal, while a private owned task retains its timeout result until explicit finish.
+
+Optional transport tests verify copied registration, validated IPv4 payload boundaries, malformed-frame timer progress, reentrancy rejection, and retained errors when shared polling, ARP, or ICMP operations detect cancellation or a device failure.
+
+The isolated backend tests schedule out-of-order and wrapping-time receive events, drain bounded transmit history through repeated ring reuse, inject random errors and short fills, and advance idle time without consuming a packet or one-shot cancellation.
+
+The guest probe validates the real strict-C90 interface, unsupported-connect behavior, unchanged output on rejection, zero-capacity receive errors, target idle unavailability, final disable, and fresh state on the next application run.
+
+Neither suite claims TCP packet validation, secure active open, byte-stream transfer, FIN/TIME_WAIT processing, target idle/wakeup, or wire interoperability, which are not implemented by the foundation.

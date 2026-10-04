@@ -1,6 +1,7 @@
 #include "net_platform.h"
 
 #include "../platform.h"
+#include "raw.h"
 
 static int keyboard_cancel(void *context)
 {
@@ -37,4 +38,13 @@ int net_set_cancel_callback(net_cancel_callback callback, void *context)
 int net_cancel_requested(void)
 {
     return active_cancel_callback(active_cancel_context) != 0;
+}
+
+int net_idle(unsigned int maximum_ms)
+{
+    if (!net_timeout_valid(maximum_ms)) {
+        return SYS_ERR_RANGE;
+    }
+    /* No software spin fallback; the assembly wait is intentionally not here. */
+    return maximum_ms == 0U ? 0 : SYS_ERR_UNAVAILABLE;
 }

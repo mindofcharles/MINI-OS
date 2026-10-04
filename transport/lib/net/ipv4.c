@@ -64,7 +64,9 @@ int net_ipv4_decode(const struct net_context *context,
                context->device_mac.octets, 6U) != 0 ||
         memcmp(parsed.destination.octets,
                context->config.address.octets, 4U) != 0 ||
-        ip[9] != NET_IPV4_PROTOCOL_ICMP) {
+        (ip[9] != NET_IPV4_PROTOCOL_ICMP &&
+         (context->transport.owner == 0 ||
+          ip[9] != context->transport.protocol))) {
         return NET_IPV4_UNSUPPORTED;
     }
     parsed.payload = ip + header_length;
@@ -92,7 +94,11 @@ int net_ipv4_handle(struct net_context *context,
     if (classification < 0) {
         return classification;
     }
-    return net_icmp_handle(context, ethernet, &packet);
+    if (packet.protocol == NET_IPV4_PROTOCOL_ICMP) {
+        return net_icmp_handle(context, ethernet, &packet);
+    }
+    return context->transport.input(context->transport.owner, ethernet,
+                                     &packet);
 }
 
 int net_ipv4_send(struct net_context *context,
@@ -105,7 +111,9 @@ int net_ipv4_send(struct net_context *context,
 
     if (context == 0 || destination == 0 || next_hop_mac == 0 ||
         payload_length > NET_IPV4_PAYLOAD_MAX ||
-        protocol != NET_IPV4_PROTOCOL_ICMP) {
+        (protocol != NET_IPV4_PROTOCOL_ICMP &&
+         (context->transport.owner == 0 ||
+          protocol != context->transport.protocol))) {
         return NET_ERR_INVALID;
     }
     if (!context->initialized || !context->tx_prepared) {

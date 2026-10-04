@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import os
 import re
 import shutil
@@ -240,19 +241,51 @@ def verify_kernel_entry_stub(repo: Path) -> None:
 
 def verify_deterministic_network_backends(repo: Path) -> None:
     phase_b_marker = b"MINI_OS_PHASE_B_DETERMINISTIC_PLATFORM_ONLY"
-    phase_d_marker = b"MINI_OS_PHASE_D_DETERMINISTIC_BACKEND_ONLY"
-    run(["make", "test-network-host"], repo)
+    network_marker = b"MINI_OS_NETWORK_DETERMINISTIC_BACKEND_ONLY"
+    run(["make", "test-network-host", "test-network-sanitizers"], repo)
     phase_b_binary = repo / "build/network-phase-b/platform_test"
     phase_d_binary = repo / "build/network-phase-d/backend_test"
+    phase_e_binary = repo / "build/network-phase-e/foundation_test"
     production_image = (repo / "build/mini_os.img").read_bytes()
     if phase_b_marker not in phase_b_binary.read_bytes():
         raise RuntimeError("deterministic platform binary has no test-only marker")
-    if phase_d_marker not in phase_d_binary.read_bytes():
-        raise RuntimeError("deterministic packet backend has no test-only marker")
+    for binary in (phase_d_binary, phase_e_binary):
+        if network_marker not in binary.read_bytes():
+            raise RuntimeError(
+                f"network host test has no shared backend marker: {binary.name}"
+            )
     if phase_b_marker in production_image:
         raise RuntimeError("deterministic platform marker entered production image")
-    if phase_d_marker in production_image:
-        raise RuntimeError("deterministic packet backend entered production image")
+    if network_marker in production_image:
+        raise RuntimeError("shared deterministic network backend entered production image")
+
+    header_rebuild = run(
+        [
+            "make", "-n", "-W", "tests/network_common/deterministic_backend.h",
+            "test-network-host", "test-network-sanitizers",
+        ],
+        repo,
+    )
+    rebuild_lines = header_rebuild.stdout.splitlines()
+    backend_consumers = (
+        phase_d_binary,
+        repo / "build/network-phase-d/address_test",
+        repo / "build/network-phase-d/ethernet_test",
+        repo / "build/network-phase-d/arp_test",
+        repo / "build/network-phase-d/ipv4_test",
+        phase_e_binary,
+        repo / "build/network-phase-e/foundation_sanitizer_test",
+    )
+    for binary in backend_consumers:
+        output_option = f" -o {binary.relative_to(repo)}"
+        if not any(
+            "tests/network_common/deterministic_backend.c" in line
+            and output_option in line
+            for line in rebuild_lines
+        ):
+            raise RuntimeError(
+                f"shared backend header does not rebuild its consumer: {binary.name}"
+            )
 
     symbols = run(["nm", "-u", str(phase_b_binary)], repo).stdout
     if "getchar" in symbols or "kbd_poll_key" in symbols:
@@ -1049,6 +1082,70 @@ def phase_a_image_boundaries(repo: Path, base: int, image_size: int) -> None:
     smoke_exact_binary(repo, exact_lld, "lld")
 
 
+def verify_transport_manifest_dependency(repo: Path) -> None:
+    injected_document = repo / "transport/lib/net/README.md"
+    injected_marker = b"MINI_OS_TRANSPORT_MANIFEST_ONLY_MARKER"
+    image_path = repo / "build/mini_os.img"
+    manifest_path = repo / "build/transport-inputs.manifest"
+    unaffected = [
+        repo / "build/boot.bin",
+        repo / "build/kernel.bin",
+        repo / "build/crt0.o",
+        repo / "build/minilibc.o",
+        repo / "build/compiler_rt.o",
+    ]
+    unaffected += sorted((repo / "build/transport").rglob("*.o"))
+    unaffected += sorted((repo / "transport/build").rglob("*.bin"))
+    observed = [image_path, manifest_path] + unaffected
+    before_times = {path: timestamp(path) for path in observed}
+    before_hashes = {
+        path: hashlib.sha256(path.read_bytes()).digest() for path in observed
+    }
+    if injected_marker in image_path.read_bytes():
+        raise RuntimeError("transport manifest marker was already injected")
+
+    # Negative control: remove only the image's manifest prerequisite in a
+    # separate makefile; the real Makefile and all other dependencies stay intact.
+    makefile = (repo / "Makefile").read_text(encoding="utf-8")
+    image_rules = [
+        line for line in makefile.splitlines() if line.startswith("$(OS_IMG):")
+    ]
+    prerequisite = " $(TRANSPORT_INJECT_MANIFEST)"
+    if len(image_rules) != 1 or image_rules[0].count(prerequisite) != 1:
+        raise RuntimeError("image rule has no unique transport manifest dependency")
+    disabled_makefile = repo / "build/manifest-disabled.mk"
+    disabled_makefile.write_text(
+        makefile.replace(image_rules[0], image_rules[0].replace(prerequisite, ""), 1),
+        encoding="utf-8",
+    )
+    with injected_document.open("ab") as stream:
+        stream.write(b"\n<!-- " + injected_marker + b" -->\n")
+    make_source_newer(injected_document)
+    run(["make", "-f", str(disabled_makefile.relative_to(repo))], repo)
+    assert_unchanged(before_times, observed, "disabled transport manifest dependency")
+    for path in observed:
+        if hashlib.sha256(path.read_bytes()).digest() != before_hashes[path]:
+            raise RuntimeError(f"disabled manifest changed an artifact: {path}")
+    if injected_marker in image_path.read_bytes():
+        raise RuntimeError("unlinked document was injected without the manifest dependency")
+
+    run(["make"], repo)
+    assert_changed(before_times, [manifest_path, image_path], "manifest-only reinjection")
+    assert_unchanged(before_times, unaffected, "manifest-only reinjection")
+    for path in unaffected:
+        if hashlib.sha256(path.read_bytes()).digest() != before_hashes[path]:
+            raise RuntimeError(f"manifest-only reinjection changed a binary or object: {path}")
+    if hashlib.sha256(image_path.read_bytes()).digest() == before_hashes[image_path]:
+        raise RuntimeError("manifest-only reinjection left the image byte-identical")
+    if injected_marker not in image_path.read_bytes():
+        raise RuntimeError("rebuilt image omitted the changed unlinked document")
+
+    # A stable fingerprint must not keep rebuilding the image on later makes.
+    after_times = {path: timestamp(path) for path in observed}
+    run(["make"], repo)
+    assert_unchanged(after_times, observed, "no-op after manifest-only reinjection")
+
+
 def verify_per_application_libraries(repo: Path) -> None:
     net_directory = repo / "transport/lib/net"
     ssh_directory = repo / "transport/lib/ssh"
@@ -1061,6 +1158,7 @@ def verify_per_application_libraries(repo: Path) -> None:
         "transport/lib/net/arp.c",
         "transport/lib/net/ipv4.c",
         "transport/lib/net/icmp.c",
+        "transport/lib/net/service.c",
         "transport/lib/net/poll.c",
     ]
     ping_source = repo / "transport/apps/ping.c"
@@ -1081,14 +1179,18 @@ def verify_per_application_libraries(repo: Path) -> None:
     hello_binary.unlink()
     hello_object.unlink()
     compiler_runtime.unlink(missing_ok=True)
-    for network_object in (repo / "build/transport/lib/net").glob("*.o"):
+    for network_object in (repo / "build/transport/lib/net").rglob("*.o"):
         network_object.unlink()
+    for crypto_object in (repo / "build/transport/lib/crypto").glob("*.o"):
+        crypto_object.unlink()
     hello = run(["make", "transport/build/apps/hello.bin"], repo)
     hello_output = hello.stdout + hello.stderr
     if "compiler_rt.c" in hello_output or "transport/lib/net/" in hello_output:
         raise RuntimeError("ordinary application acquired network-only objects")
     if compiler_runtime.exists() or any(
-        (repo / "build/transport/lib/net").glob("*.o")
+        (repo / "build/transport/lib/net").rglob("*.o")
+    ) or any(
+        (repo / "build/transport/lib/crypto").glob("*.o")
     ):
         raise RuntimeError("ordinary application built network-only support")
 
@@ -1100,6 +1202,8 @@ def verify_per_application_libraries(repo: Path) -> None:
         "dependency_probe.c" in netdiag_output
         or any(source in netdiag_output for source in ipv4_sources)
         or (repo / "build/transport/lib/net/dependency_probe.o").exists()
+        or any((repo / "build/transport/lib/net/tcp").glob("*.o"))
+        or any((repo / "build/transport/lib/crypto").glob("*.o"))
         or any(
             (
                 repo
@@ -1230,6 +1334,10 @@ def verify_per_application_libraries(repo: Path) -> None:
         raise RuntimeError("network context has an unexpected memory footprint")
     if (repo / "build/transport/lib/ssh/dependency_probe.o").exists():
         raise RuntimeError("non-SSH network application acquired SSH objects")
+    if any((repo / "build/transport/lib/net/tcp").glob("*.o")) or any(
+        (repo / "build/transport/lib/crypto").glob("*.o")
+    ):
+        raise RuntimeError("ICMP application acquired TCP queues or crypto objects")
 
     ping_binary.unlink()
     ping_object.unlink()
@@ -1257,6 +1365,17 @@ def verify_per_application_libraries(repo: Path) -> None:
     run(["make", protocol_override, "app", "APP=ssh.c"], repo)
     if not (repo / "build/transport/lib/ssh/dependency_probe.o").is_file():
         raise RuntimeError("SSH application did not acquire its private objects")
+    tcp_object = repo / "build/transport/lib/net/tcp/connection.o"
+    crypto_object = repo / "build/transport/lib/crypto/clear.o"
+    if not tcp_object.is_file() or not crypto_object.is_file():
+        raise RuntimeError("TCP-selected application did not acquire bounded TCP and crypto objects")
+    tcp_symbols = run(["nm", "-S", str(tcp_object)], repo).stdout
+    tcp_match = re.search(
+        r"^[0-9A-Fa-f]+\s+([0-9A-Fa-f]+)\s+[Bb]\s+tcp_global_context$",
+        tcp_symbols, re.MULTILINE,
+    )
+    if tcp_match is None or not 8192 <= int(tcp_match.group(1), 16) <= 12288:
+        raise RuntimeError("TCP static context is not bounded BSS containing both queues")
 
     ping_source.unlink()
     ssh_app_source.unlink()
@@ -1297,6 +1416,10 @@ def main() -> int:
         reject_invalid_elf_inputs(repo, app_base, app_size)
         check_elf2bin_capacities(repo, app_base)
         smoke(repo)
+        run(
+            ["python3", "tests/network_phase_e.py", "--image", "build/mini_os.img"],
+            repo,
+        )
         phase_a_image_boundaries(repo, app_base, app_size)
         verify_partial_sector_bss_zeroing(repo, app_base, app_size)
 
@@ -1333,27 +1456,7 @@ def main() -> int:
         assert_changed(before, tracked[1:], "runtime-header dependency")
         assert_unchanged(before, tracked[:1], "runtime-header dependency")
 
-        injected_source = repo / "transport/lib/net/address.c"
-        injected_marker = b"MINI_OS_TRANSPORT_DEPENDENCY_MARKER"
-        with injected_source.open("ab") as stream:
-            stream.write(b"\n/* " + injected_marker + b" */\n")
-        make_source_newer(injected_source)
-        image_path = repo / "build/mini_os.img"
-        unaffected = [
-            repo / "build/kernel.bin",
-            repo / "build/minilibc.o",
-            repo / "transport/build/apps/hello.bin",
-            repo / "transport/build/apps/netdiag.bin",
-        ]
-        before_image = {image_path: timestamp(image_path)}
-        before_unaffected = {path: timestamp(path) for path in unaffected}
-        run(["make"], repo)
-        assert_changed(before_image, [image_path], "transport-tree dependency")
-        assert_unchanged(
-            before_unaffected, unaffected, "transport-tree dependency"
-        )
-        if injected_marker not in image_path.read_bytes():
-            raise RuntimeError("rebuilt image omitted the changed transport source")
+        verify_transport_manifest_dependency(repo)
 
         driver = repo / "OS_src/kernel/drivers.asm"
         with driver.open("a", encoding="utf-8") as stream:
@@ -1377,6 +1480,10 @@ def main() -> int:
             raise RuntimeError("fallback build did not use elf2bin")
         run(["build/check_image", "build/mini_os.img"], repo)
         smoke(repo)
+        run(
+            ["python3", "tests/network_phase_e.py", "--image", "build/mini_os.img"],
+            repo,
+        )
 
     print("Build regression: PASS")
     return 0

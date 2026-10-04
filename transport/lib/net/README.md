@@ -1,33 +1,50 @@
 # Network Library Boundary
 
-Network-library implementations compile as modern C with fatal project warnings, while application-facing headers remain compatible with strict C90.
+Network-library implementations compile as modern C with fatal project warnings, while application-facing headers and guest probes remain compatible with strict C90.
 
-The base object group contains `raw.c`, `platform.c`, and `time.c` and is linked into raw-frame consumers such as `netdiag` and `test_network` as well as higher-level network applications.
+## Selected object groups
 
-The IPv4 object group is separate and is linked into `ping`, `netcat`, `ssh`, and the strict-C90 `test_net_protocol` guest probe, so raw diagnostics do not acquire application-protocol state or code.
+- The base group contains `raw.c`, `platform.c`, and `time.c` and is selected by raw-frame and higher-level network consumers.
+- The IPv4 group contains initialization, address, byte-order, checksum, Ethernet, ARP, IPv4, ICMP, shared service, and polling code and is selected by `ping`, TCP consumers, and protocol probes.
+- The TCP group contains `tcp/api.c`, `tcp/connection.c`, and `tcp/timers.c` and is selected only by named TCP consumers and `test_tcp_contract`.
+- The shared crypto group currently contains only `../crypto/clear.c` and is selected with TCP, without importing SSH or a hash/HMAC implementation.
 
-The build rejects a network source that is missing from both groups, appears in both groups, or is named by a group but absent from the source tree.
+The build rejects every source under the network and shared crypto directories that has no group, belongs to more than one group, or is named by a group but absent from the tree.
 
-`net.h` defines the stable C90 application contract and library-level errors for Ethernet, ARP, static IPv4, and ICMP Echo, while `internal.h` owns modern-C integer-width checks and fixed application-state structures.
+Ordinary applications acquire none of these groups, raw diagnostics acquire no IPv4 or TCP state, and ICMP applications acquire no TCP queues or cryptographic objects.
 
-The platform layer supplies `net_platform.h`, wrap-safe relative-time helpers, production monotonic and random adapters, and the nonblocking cancellation callback adapter.
+## Implemented Ethernet and IPv4 behavior
 
-The raw transport supplies `raw.h`, shared `raw.def` layout constants, and modern-C wrappers for the three polling NE2000 frame syscalls.
+`net.h` defines the stable C90 Ethernet, ARP, static-IPv4, and ICMP Echo contract, while `internal.h` owns modern-C width checks and bounded application state.
 
-Stage D1 provides the public boundary, fixed state, and deterministic backend.
+`raw.h` and `raw.def` define the polling NE2000 frame interface, and `net_platform.h` supplies relative-time, production random, nonblocking cancellation, and bounded idle-hook declarations.
 
-Stage D2 provides alignment-safe network-byte-order helpers, the Internet checksum, canonical dotted-decimal IPv4 parsing, static configuration validation, raw-device contract validation, and transactional one-time initialization.
+The Ethernet receive view includes padding, while ARP, IPv4, and ICMP consume only their validated message lengths.
 
-Stage D3 provides private Ethernet II frame construction and classification, destination and source validation, explicit zero padding, normalized-frame length checks, and deterministic host tests.
+ARP uses a four-entry expiring cache, bounded retries, cross-call request throttling, and static next-hop selection.
 
-Stage D4 provides private Ethernet/IPv4 ARP parsing, request and reply construction, a four-entry expiring cache, bounded retry and request throttling, on-link resolution, static next-hop selection, and the public `net_poll` service loop.
+The shared service loop rejects reentrancy and dispatches validated unfragmented IPv4 to ICMP or a copied private optional transport binding, with no unconditional reference to the TCP group.
 
-The Ethernet receive view includes the complete data field, including padding, while the ARP parser consumes only its validated 28-byte message.
+`net_ping` includes resolution and Echo waiting inside one call budget and accepts only a completely matched reply.
 
-The polling loop dispatches validated unfragmented IPv4 datagrams to ICMP Echo, and `net_ping` resolves the next hop and waits for a fully matched reply within one overall deadline.
+ARP learning remains unauthenticated, and options, fragment reassembly, ICMP errors, and an idle-shell Echo server are not implemented.
 
-The IPv4 and ICMP parsers use declared protocol lengths rather than Ethernet padding, reject unsupported options and fragments, and keep protocol state in the application-owned context.
+## TCP foundation
 
-The `ping` application and guest protocol probe are strict C90, while `ipv4.c`, `icmp.c`, and `poll.c` are modern C; both deterministic host tests and QEMU protocol acceptance cover the implemented stack.
+`tcp.h` fixes C90 signatures, error values, configuration defaults, one generation-checked slot, status snapshots, explicit terminal-handle release, and final application-instance teardown.
 
-ARP learning is unauthenticated, so a matching solicited reply reduces accidental or unsolicited cache changes but does not establish peer identity; address-conflict defense is not implemented.
+The public active-open operation currently returns `TCP_ERR_UNSUPPORTED` without allocating a handle, using entropy, starting ARP, or emitting a SYN, and no public stream operation transfers bytes.
+
+Private lifecycle helpers retain terminal errors after partial-progress reporting, separate call waits from a once-captured close-grace deadline, reject unread-data loss, and prevent old handles from reaching a new generation.
+
+Failed termination clears stream storage and per-connection temporary secrets while preserving the handle's cause and the separate instance secret until explicit release and final teardown.
+
+Private owned ARP tasks survive poll-call wait expiry, preserve their original retry and deadline state, and reject stale owners; the existing public resolver remains a synchronous wrapper with unchanged task-cleanup behavior.
+
+The complete TCP context owns two 4 KiB queues inside a 12 KiB static limit, and the lower-layer context remains inside its original 4 KiB limit without another full-frame buffer or a heap dependency.
+
+The target idle hook currently returns unavailable for positive waits, so fake-clock idle tests do not establish a production idle path.
+
+TCP codec, secure handshake, actual byte streams, retransmission, FIN/TIME_WAIT processing, and target idle/wakeup remain unimplemented.
+
+Deterministic lifecycle fixtures and the guarded strict-C90 guest probe validate this foundation, not TCP wire interoperability.

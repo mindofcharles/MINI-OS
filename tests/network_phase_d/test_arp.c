@@ -1,4 +1,4 @@
-#include "deterministic_backend.h"
+#include "../network_common/deterministic_backend.h"
 
 #include "../../transport/lib/net/address.h"
 #include "../../transport/lib/net/arp.h"
@@ -87,7 +87,7 @@ static int initialize(void)
 {
     struct net_config config = valid_config();
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     memset(&net_global_context, 0, sizeof(net_global_context));
     return require(net_init(&config) == 0, "initialize stack");
 }
@@ -120,7 +120,7 @@ static void make_arp_frame(unsigned char *frame,
 
 static int queue_frame(const unsigned char *frame)
 {
-    return require(phase_d_backend_queue_receive(frame, NET_FRAME_MIN) == 0,
+    return require(network_test_backend_queue_receive(frame, NET_FRAME_MIN) == 0,
                    "queue frame");
 }
 
@@ -218,7 +218,7 @@ static int test_request_and_probe(void)
                    &peer_mac, &peer_ip, &broadcast_mac, &local_ip);
     if (!queue_frame(frame) ||
         !require(net_poll(0U) == 1, "reply to request for local address") ||
-        !require(phase_d_backend_transmit_count() == 1U,
+        !require(network_test_backend_transmit_count() == 1U,
                  "one ARP reply") ||
         !require(net_arp_cache_lookup(&net_global_context, &peer_ip,
                                       &found) == 1 &&
@@ -228,11 +228,11 @@ static int test_request_and_probe(void)
                  "one cache update")) {
         return 0;
     }
-    sent = phase_d_backend_transmit_frame(0U);
+    sent = network_test_backend_transmit_frame(0U);
     make_arp_frame(expected, &peer_mac, &local_mac, NET_ARP_REPLY,
                    &local_mac, &local_ip, &peer_mac, &peer_ip);
     memset(expected + 42U, 0, NET_FRAME_MIN - 42U);
-    if (!require(phase_d_backend_transmit_length(0U) == NET_FRAME_MIN,
+    if (!require(network_test_backend_transmit_length(0U) == NET_FRAME_MIN,
                  "reply minimum frame length") ||
         !require(memcmp(sent, expected, NET_FRAME_MIN) == 0,
                  "complete ARP reply bytes and padding") ||
@@ -264,7 +264,7 @@ static int test_request_and_probe(void)
         !require(net_poll(0U) == 1, "reply to ARP probe") ||
         !require(net_global_context.counters.arp_cache_updates == 0U,
                  "probe does not create zero-IP entry") ||
-        !require(memcmp(phase_d_backend_transmit_frame(0U) + 38U,
+        !require(memcmp(network_test_backend_transmit_frame(0U) + 38U,
                         zero_ip.octets, 4U) == 0,
                  "probe reply targets zero IP")) {
         return 0;
@@ -274,7 +274,7 @@ static int test_request_and_probe(void)
     return queue_frame(frame) &&
            require(net_poll(0U) == 0,
                    "ignore request for unrelated address") &&
-           require(phase_d_backend_transmit_count() == 1U,
+           require(network_test_backend_transmit_count() == 1U,
                    "unrelated request causes no reply");
 }
 
@@ -296,7 +296,7 @@ static int test_cache_and_routes(void)
         peers[index] = peer_ip;
         peers[index].octets[3] = (unsigned char)(20U + index);
     }
-    phase_d_backend_clock_set(UINT_MAX - 200U);
+    network_test_backend_clock_set(UINT_MAX - 200U);
     for (index = 0U; index < 4U; ++index) {
         if (!require(net_arp_cache_store(&net_global_context,
                                          &peers[index],
@@ -306,7 +306,7 @@ static int test_cache_and_routes(void)
                      "fill successive slot")) {
             return 0;
         }
-        phase_d_backend_clock_advance(10U);
+        network_test_backend_clock_advance(10U);
     }
     if (!require(net_arp_cache_lookup(&net_global_context, &peers[0],
                                       &found) == 1,
@@ -331,7 +331,7 @@ static int test_cache_and_routes(void)
                  "existing key updated")) {
         return 0;
     }
-    phase_d_backend_clock_advance(NET_ARP_CACHE_TTL_DEFAULT_MS);
+    network_test_backend_clock_advance(NET_ARP_CACHE_TTL_DEFAULT_MS);
     found = other_mac;
     if (!require(net_arp_cache_lookup(&net_global_context, &peers[4],
                                       &found) == 0 &&
@@ -389,19 +389,19 @@ static int test_resolution(void)
         !require(net_resolve_arp(&peer_ip, &found, 0U) == 0,
                  "matching broadcast reply resolves in zero-time pass") ||
         !require(mac_equal(&found, &peer_mac), "resolved MAC") ||
-        !require(phase_d_backend_transmit_count() == 1U,
+        !require(network_test_backend_transmit_count() == 1U,
                  "resolution sent one request")) {
         return 0;
     }
-    sent = phase_d_backend_transmit_frame(0U);
+    sent = network_test_backend_transmit_frame(0U);
     make_arp_frame(expected, &broadcast_mac, &local_mac,
                    NET_ARP_REQUEST, &local_mac, &local_ip,
                    &zero_mac, &peer_ip);
     memset(expected + 42U, 0, NET_FRAME_MIN - 42U);
-    if (!require(phase_d_backend_transmit_length(0U) == NET_FRAME_MIN &&
+    if (!require(network_test_backend_transmit_length(0U) == NET_FRAME_MIN &&
                      memcmp(sent, expected, NET_FRAME_MIN) == 0,
                  "complete ARP request bytes and padding") ||
-        !require(phase_d_backend_transmit_length(0U) == NET_FRAME_MIN &&
+        !require(network_test_backend_transmit_length(0U) == NET_FRAME_MIN &&
                      memcmp(sent, broadcast_mac.octets, 6U) == 0 &&
                      net_read_be16(sent + 20U) == NET_ARP_REQUEST,
                  "exact request header") ||
@@ -411,16 +411,16 @@ static int test_resolution(void)
                      memcmp(sent + 38U, peer_ip.octets, 4U) == 0,
                  "exact request addresses") ||
         !require(net_resolve_arp(&peer_ip, &found, 0U) == 0 &&
-                     phase_d_backend_transmit_count() == 1U,
+                     network_test_backend_transmit_count() == 1U,
                  "cache hit avoids request")) {
         return 0;
     }
-    phase_d_backend_clock_advance(NET_ARP_CACHE_TTL_DEFAULT_MS);
+    network_test_backend_clock_advance(NET_ARP_CACHE_TTL_DEFAULT_MS);
     found = other_mac;
     if (!require(net_resolve_arp(&peer_ip, &found, 0U) ==
                      NET_ERR_TIMEOUT &&
                      mac_equal(&found, &other_mac) &&
-                     phase_d_backend_transmit_count() == 2U,
+                     network_test_backend_transmit_count() == 2U,
                  "expired cache entry requires another request")) {
         return 0;
     }
@@ -460,7 +460,7 @@ static int test_cache_expired_key_priority(void)
         return 0;
     }
     net_global_context.arp_cache[0].valid = 0;
-    phase_d_backend_clock_advance(NET_ARP_CACHE_TTL_DEFAULT_MS);
+    network_test_backend_clock_advance(NET_ARP_CACHE_TTL_DEFAULT_MS);
     if (!require(net_arp_cache_store(&net_global_context, &existing,
                                      &other_mac) == 0 &&
                      !net_global_context.arp_cache[0].valid &&
@@ -538,7 +538,7 @@ static int test_resolution_rejections(void)
                        NET_ERR_TIMEOUT && mac_equal(&output, &other_mac),
                    "request learning cannot complete active resolution") &&
            require(net_global_context.counters.arp_cache_updates == 1U &&
-                       phase_d_backend_transmit_count() == 2U,
+                       network_test_backend_transmit_count() == 2U,
                    "request learned and answered without resolving");
 }
 
@@ -551,16 +551,16 @@ static int test_timing_and_errors(void)
     if (!initialize()) {
         return 0;
     }
-    phase_d_backend_set_receive_clock_step(250U);
+    network_test_backend_set_receive_clock_step(250U);
     if (!require(net_resolve_arp(&peer_ip, &output, 3500U) ==
                      NET_ERR_TIMEOUT,
                  "three attempts then timeout") ||
         !require(mac_equal(&output, &other_mac),
                  "timeout preserves output") ||
-        !require(phase_d_backend_transmit_count() == 3U &&
-                     phase_d_backend_transmit_time(0U) == 0U &&
-                     phase_d_backend_transmit_time(1U) == 1000U &&
-                     phase_d_backend_transmit_time(2U) == 2000U,
+        !require(network_test_backend_transmit_count() == 3U &&
+                     network_test_backend_transmit_time(0U) == 0U &&
+                     network_test_backend_transmit_time(1U) == 1000U &&
+                     network_test_backend_transmit_time(2U) == 2000U,
                  "exact retry spacing and count") ||
         !require(net_global_context.pending_arp.active == 0,
                  "pending cleared after retries")) {
@@ -572,26 +572,26 @@ static int test_timing_and_errors(void)
     }
     if (!require(net_resolve_arp(&peer_ip, &output, 0U) ==
                      NET_ERR_TIMEOUT &&
-                     phase_d_backend_transmit_count() == 1U,
+                     network_test_backend_transmit_count() == 1U,
                  "zero-time call transmits once") ||
         !require(net_resolve_arp(&other_ip, &output, 0U) ==
                      NET_ERR_TIMEOUT &&
-                     phase_d_backend_transmit_count() == 1U,
+                     network_test_backend_transmit_count() == 1U,
                  "cross-destination request throttle")) {
         return 0;
     }
-    phase_d_backend_clock_advance(999U);
+    network_test_backend_clock_advance(999U);
     if (!require(net_resolve_arp(&other_ip, &output, 0U) ==
                      NET_ERR_TIMEOUT &&
-                     phase_d_backend_transmit_count() == 1U,
+                     network_test_backend_transmit_count() == 1U,
                  "throttle before one second")) {
         return 0;
     }
-    phase_d_backend_clock_advance(1U);
+    network_test_backend_clock_advance(1U);
     if (!require(net_resolve_arp(&other_ip, &output, 0U) ==
                      NET_ERR_TIMEOUT &&
-                     phase_d_backend_transmit_count() == 2U &&
-                     phase_d_backend_transmit_time(1U) == 1000U,
+                     network_test_backend_transmit_count() == 2U &&
+                     network_test_backend_transmit_time(1U) == 1000U,
                  "throttle opens at one second")) {
         return 0;
     }
@@ -613,24 +613,24 @@ static int test_timing_and_errors(void)
     if (!initialize()) {
         return 0;
     }
-    phase_d_backend_set_cancelled(1);
+    network_test_backend_set_cancelled(1);
     if (!require(net_resolve_arp(&peer_ip, &output, 1000U) ==
                      NET_ERR_CANCELLED &&
-                     phase_d_backend_transmit_count() == 0U &&
+                     network_test_backend_transmit_count() == 0U &&
                      mac_equal(&output, &other_mac),
                  "cancellation before transmit") ||
         !require(net_poll(0U) == NET_ERR_CANCELLED,
                  "poll cancellation")) {
         return 0;
     }
-    phase_d_backend_set_cancelled(0);
+    network_test_backend_set_cancelled(0);
     counter.calls = 0U;
     counter.limit = 3U;
     if (!require(net_set_cancel_callback(cancel_after_calls,
                                           &counter) == 0 &&
                      net_resolve_arp(&peer_ip, &output, 1000U) ==
                          NET_ERR_CANCELLED &&
-                     phase_d_backend_transmit_count() == 1U &&
+                     network_test_backend_transmit_count() == 1U &&
                      mac_equal(&output, &other_mac),
                  "callback cancellation after one request")) {
         return 0;
@@ -646,11 +646,11 @@ static int test_timing_and_errors(void)
         return 0;
     }
     net_global_context.pending_arp.active = 0;
-    if (!require(phase_d_backend_queue_receive_error(SYS_ERR_UNAVAILABLE) == 0 &&
+    if (!require(network_test_backend_queue_receive_error(SYS_ERR_UNAVAILABLE) == 0 &&
                      net_poll(0U) == NET_ERR_UNAVAILABLE &&
                      net_global_context.counters.received_frames == 0U,
                  "unavailable receive does not count frame") ||
-        !require(phase_d_backend_queue_receive_error(SYS_ERR_DEVICE) == 0 &&
+        !require(network_test_backend_queue_receive_error(SYS_ERR_DEVICE) == 0 &&
                      net_poll(0U) == NET_ERR_DEVICE &&
                      net_global_context.counters.received_frames == 0U,
                  "device receive error does not count frame")) {
@@ -666,10 +666,10 @@ static int test_device_and_wrap(void)
     if (!initialize()) {
         return 0;
     }
-    if (!require(phase_d_backend_set_next_send_error(SYS_ERR_UNAVAILABLE) == 0 &&
+    if (!require(network_test_backend_set_next_send_error(SYS_ERR_UNAVAILABLE) == 0 &&
                      net_resolve_arp(&peer_ip, &output, 0U) ==
                          NET_ERR_UNAVAILABLE &&
-                     phase_d_backend_transmit_count() == 0U &&
+                     network_test_backend_transmit_count() == 0U &&
                      net_global_context.pending_arp.active == 0 &&
                      mac_equal(&output, &other_mac),
                  "unavailable transmit preserves output and clears pending")) {
@@ -678,7 +678,7 @@ static int test_device_and_wrap(void)
     if (!initialize()) {
         return 0;
     }
-    if (!require(phase_d_backend_set_next_send_result(59) == 0 &&
+    if (!require(network_test_backend_set_next_send_result(59) == 0 &&
                      net_resolve_arp(&peer_ip, &output, 0U) ==
                          NET_ERR_DEVICE &&
                      net_global_context.pending_arp.active == 0 &&
@@ -689,7 +689,7 @@ static int test_device_and_wrap(void)
     if (!initialize()) {
         return 0;
     }
-    if (!require(phase_d_backend_queue_receive_error(SYS_ERR_DEVICE) == 0 &&
+    if (!require(network_test_backend_queue_receive_error(SYS_ERR_DEVICE) == 0 &&
                      net_resolve_arp(&peer_ip, &output, 1000U) ==
                          NET_ERR_DEVICE &&
                      net_global_context.counters.received_frames == 0U &&
@@ -700,15 +700,15 @@ static int test_device_and_wrap(void)
     if (!initialize()) {
         return 0;
     }
-    phase_d_backend_clock_set(UINT_MAX - 499U);
-    phase_d_backend_set_receive_clock_step(250U);
+    network_test_backend_clock_set(UINT_MAX - 499U);
+    network_test_backend_set_receive_clock_step(250U);
     return require(net_resolve_arp(&peer_ip, &output, 3500U) ==
                        NET_ERR_TIMEOUT &&
-                       phase_d_backend_transmit_count() == 3U,
+                       network_test_backend_transmit_count() == 3U,
                    "wrap-safe resolution deadline and retries") &&
-           require(phase_d_backend_transmit_time(0U) == UINT_MAX - 499U &&
-                       phase_d_backend_transmit_time(1U) == 500U &&
-                       phase_d_backend_transmit_time(2U) == 1500U,
+           require(network_test_backend_transmit_time(0U) == UINT_MAX - 499U &&
+                       network_test_backend_transmit_time(1U) == 500U &&
+                       network_test_backend_transmit_time(2U) == 1500U,
                    "wrap-safe retry timestamps");
 }
 
@@ -732,7 +732,7 @@ static int test_rejections_and_deadline(void)
                    &peer_mac, &local_ip, &local_mac, &local_ip);
     if (!queue_frame(frame) ||
         !require(net_poll(0U) == 0 &&
-                     phase_d_backend_transmit_count() == 0U,
+                     network_test_backend_transmit_count() == 0U,
                  "foreign claim for local IP ignored")) {
         return 0;
     }
@@ -742,7 +742,7 @@ static int test_rejections_and_deadline(void)
     if (!queue_frame(frame) ||
         !require(net_poll(0U) == 0 &&
                      net_global_context.counters.malformed_frames == 1U &&
-                     phase_d_backend_transmit_count() == 0U,
+                     network_test_backend_transmit_count() == 0U,
                  "malformed ARP causes no reply or cache write")) {
         return 0;
     }
@@ -761,7 +761,7 @@ static int test_rejections_and_deadline(void)
     }
     make_arp_frame(frame, &local_mac, &peer_mac, NET_ARP_REPLY,
                    &peer_mac, &peer_ip, &local_mac, &local_ip);
-    phase_d_backend_set_receive_clock_step(5U);
+    network_test_backend_set_receive_clock_step(5U);
     return queue_frame(frame) &&
            require(net_resolve_arp(&peer_ip, &output, 4U) ==
                        NET_ERR_TIMEOUT && mac_equal(&output, &other_mac),
@@ -790,12 +790,12 @@ static int test_poll_idle_and_ipv4(void)
         !require(net_poll(0U) == 0, "zero-time idle poll")) {
         return 0;
     }
-    phase_d_backend_set_receive_clock_step(100U);
+    network_test_backend_set_receive_clock_step(100U);
     if (!require(net_poll(500U) == 0 && net_clock_now_ms() == 500U,
                  "positive-duration idle poll ends at deadline")) {
         return 0;
     }
-    phase_d_backend_clock_set(UINT_MAX - 199U);
+    network_test_backend_clock_set(UINT_MAX - 199U);
     return require(net_poll(500U) == 0 && net_clock_now_ms() == 300U,
                    "wrap-safe poll deadline");
 }

@@ -1,6 +1,6 @@
 # Network
 
-Current status: Phase 0 and Phases A through D are complete. Phase E is next.
+Current status: Phase 0 and Phases A through D are complete. Phase E1's interface, ownership, and test foundation is complete; E2 is next.
 
 - Phase 0: select and measure the SSH and cryptographic libraries. Complete.
 
@@ -12,7 +12,7 @@ Current status: Phase 0 and Phases A through D are complete. Phase E is next.
 
 - Phase D: implement Ethernet, ARP, static IPv4, and ICMP. D1 through D5 implementation and host tests, plus D6 deterministic and user-network QEMU protocol acceptance, are complete.
 
-- Phase E: implement one active TCP connection and `netcat`. Planned.
+- Phase E: implement one active TCP connection and `netcat`. E1 foundation is complete, while E2 through E8 remain planned; TCP handshakes and byte-stream transfer are not yet available.
 
 - Phases F and G: port the selected SSH stack and add a pinned-host remote-command client. Planned.
 

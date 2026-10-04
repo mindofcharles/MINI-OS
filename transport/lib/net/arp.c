@@ -27,6 +27,101 @@ static int ipv4_zero(const struct net_ipv4_addr *address)
     return memcmp(address->octets, zero, sizeof(zero)) == 0;
 }
 
+int net_arp_task_result(struct net_context *context, net_u32 owner,
+                         struct net_mac_addr *mac)
+{
+    struct net_pending_arp *task;
+
+    if (context == 0) {
+        return NET_ERR_INVALID;
+    }
+    task = &context->pending_arp;
+    if (!context->initialized || !task->active || task->owner != owner) {
+        return NET_ERR_STATE;
+    }
+    if (task->result < 0) {
+        return task->result;
+    }
+    if (task->resolved) {
+        if (mac != 0) {
+            *mac = task->resolved_mac;
+        }
+        return 0;
+    }
+    if (net_timeout_expired(task->started_ms, net_clock_now_ms(),
+                            task->timeout_ms) ||
+        (task->attempts >= context->config.arp_retry_count &&
+         net_elapsed_ms(task->last_request_ms, net_clock_now_ms()) >=
+             context->config.arp_retry_interval_ms)) {
+        task->result = NET_ERR_TIMEOUT;
+        return task->result;
+    }
+    return NET_ARP_TASK_PENDING;
+}
+
+int net_arp_task_start(struct net_context *context,
+                        const struct net_ipv4_addr *address, net_u32 owner,
+                        net_u32 started_ms, unsigned int timeout_ms)
+{
+    struct net_mac_addr cached;
+    int result;
+
+    if (context == 0 || address == 0 || timeout_ms == 0U ||
+        !net_timeout_valid(timeout_ms)) {
+        return NET_ERR_INVALID;
+    }
+    if (!context->initialized) {
+        return NET_ERR_STATE;
+    }
+    if (owner != NET_ARP_OWNER_SYNC &&
+        (context->transport.owner == 0 ||
+         context->transport.arp_owner != owner)) {
+        return NET_ERR_STATE;
+    }
+    if (context->pending_arp.active) {
+        if (context->pending_arp.owner != owner ||
+            !ipv4_equal(&context->pending_arp.address, address)) {
+            return NET_ERR_BUSY;
+        }
+        /* Repeated start cannot change the original deadline or retries. */
+        return net_arp_task_result(context, owner, 0);
+    }
+    if (!net_ipv4_is_on_link_peer(&context->config, address)) {
+        return NET_ERR_NO_ROUTE;
+    }
+    if (net_timeout_expired(started_ms, net_clock_now_ms(), timeout_ms)) {
+        return NET_ERR_TIMEOUT;
+    }
+    result = net_arp_cache_lookup(context, address, &cached);
+    if (result < 0) {
+        return result;
+    }
+    memset(&context->pending_arp, 0, sizeof(context->pending_arp));
+    context->pending_arp.address = *address;
+    context->pending_arp.owner = owner;
+    context->pending_arp.started_ms = started_ms;
+    context->pending_arp.timeout_ms = timeout_ms;
+    context->pending_arp.active = 1;
+    if (result == 1) {
+        context->pending_arp.resolved_mac = cached;
+        context->pending_arp.resolved = 1;
+        return 0;
+    }
+    return net_arp_task_result(context, owner, 0);
+}
+
+int net_arp_task_finish(struct net_context *context, net_u32 owner)
+{
+    if (context == 0) {
+        return NET_ERR_INVALID;
+    }
+    if (!context->pending_arp.active || context->pending_arp.owner != owner) {
+        return NET_ERR_STATE;
+    }
+    memset(&context->pending_arp, 0, sizeof(context->pending_arp));
+    return 0;
+}
+
 int net_arp_parse(const struct net_ethernet_view *view,
                   struct net_arp_packet *packet)
 {
@@ -231,6 +326,8 @@ int net_arp_handle(struct net_context *context,
         return result == 0 ? 1 : result;
     }
     if (!context->pending_arp.active ||
+        net_arp_task_result(context, context->pending_arp.owner, 0) !=
+            NET_ARP_TASK_PENDING ||
         context->pending_arp.attempts == 0U ||
         context->pending_arp.resolved ||
         !ipv4_equal(&packet.sender_ip,
@@ -265,7 +362,9 @@ int net_arp_timer(struct net_context *context, net_u32 now)
     if (!context->initialized) {
         return NET_ERR_STATE;
     }
-    if (!context->pending_arp.active || context->pending_arp.resolved ||
+    if (!context->pending_arp.active ||
+        net_arp_task_result(context, context->pending_arp.owner, 0) !=
+            NET_ARP_TASK_PENDING ||
         context->pending_arp.attempts >=
             context->config.arp_retry_count) {
         return 0;

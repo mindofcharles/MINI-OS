@@ -1,4 +1,4 @@
-#include "deterministic_backend.h"
+#include "../network_common/deterministic_backend.h"
 
 #include "../../transport/lib/net/ethernet.h"
 #include "../../transport/lib/net/net_platform.h"
@@ -44,7 +44,7 @@ static int initialize(void)
 {
     struct net_config config = valid_config();
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     memset(&net_global_context, 0, sizeof(net_global_context));
     return require(net_init(&config) == 0, "initialize stack");
 }
@@ -92,7 +92,7 @@ static int test_lifecycle(void)
     struct net_ethernet_view sentinel;
     struct net_mac_addr peer;
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     memset(&net_global_context, 0, sizeof(net_global_context));
     memset(&view, 0xA5, sizeof(view));
     memcpy(&sentinel, &view, sizeof(sentinel));
@@ -250,7 +250,7 @@ static int test_receive_backend(void)
     frame[12] = 0x08U;
     frame[13] = 0x06U;
     frame[14] = 0x42U;
-    if (!require(phase_d_backend_queue_receive(frame, sizeof(frame)) == 0,
+    if (!require(network_test_backend_queue_receive(frame, sizeof(frame)) == 0,
                  "queue raw frame")) {
         return 0;
     }
@@ -266,7 +266,7 @@ static int test_receive_backend(void)
                    "raw receive payload") &&
            require(net_global_context.counters.received_frames == before + 1U,
                    "raw receive counted once") &&
-           require(phase_d_backend_queue_receive_error(SYS_ERR_DEVICE) == 0,
+           require(network_test_backend_queue_receive_error(SYS_ERR_DEVICE) == 0,
                    "queue raw receive error") &&
            require(net_recv_frame(net_global_context.rx_frame,
                                   sizeof(net_global_context.rx_frame)) ==
@@ -301,7 +301,7 @@ static int test_transmit_lengths(void)
     memcpy(peer.octets, peer_mac, 6U);
     memcpy(broadcast.octets, broadcast_mac, 6U);
     for (index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
-        phase_d_backend_clear_transmits();
+        network_test_backend_clear_transmits();
         memset(net_global_context.tx_frame, 0xA5,
                sizeof(net_global_context.tx_frame));
         payload = net_ethernet_begin_tx(&net_global_context);
@@ -319,13 +319,13 @@ static int test_transmit_lengths(void)
                                        cases[index].type,
                                        cases[index].payload_length) == 0,
                      "send logical payload") ||
-            !require(phase_d_backend_transmit_count() == 1U &&
-                         phase_d_backend_transmit_length(0U) ==
+            !require(network_test_backend_transmit_count() == 1U &&
+                         network_test_backend_transmit_length(0U) ==
                              cases[index].wire_length,
                      "one exact-length raw send")) {
             return 0;
         }
-        captured = phase_d_backend_transmit_frame(0U);
+        captured = network_test_backend_transmit_frame(0U);
         if (!require(memcmp(captured, destination->octets, 6U) == 0 &&
                          memcmp(captured + 6U, local_mac, 6U) == 0,
                      "destination and initialized source MAC") ||
@@ -352,7 +352,7 @@ static int test_transmit_lengths(void)
                                        cases[index].type,
                                        cases[index].payload_length) ==
                          NET_ERR_STATE &&
-                         phase_d_backend_transmit_count() == 1U,
+                         network_test_backend_transmit_count() == 1U,
                      "prepared frame consumed once")) {
             return 0;
         }
@@ -374,7 +374,7 @@ static int test_transmit_validation_and_errors(void)
     memcpy(broadcast.octets, broadcast_mac, 6U);
     memcpy(multicast.octets, multicast_mac, 6U);
     memset(&zero, 0, sizeof(zero));
-    phase_d_backend_clear_transmits();
+    network_test_backend_clear_transmits();
     net_ethernet_begin_tx(&net_global_context);
     if (!require(net_ethernet_send(&net_global_context, 0,
                                    NET_ETHERTYPE_ARP, 0U) == NET_ERR_INVALID,
@@ -398,20 +398,20 @@ static int test_transmit_validation_and_errors(void)
         !require(net_ethernet_send(&net_global_context, &broadcast,
                                    NET_ETHERTYPE_IPV4, 0U) == NET_ERR_INVALID,
                  "reject IPv4 broadcast send") ||
-        !require(phase_d_backend_transmit_count() == 0U,
+        !require(network_test_backend_transmit_count() == 0U,
                  "invalid sends do not reach raw backend") ||
         !require(net_ethernet_send(&net_global_context, &peer,
                                    NET_ETHERTYPE_ARP, 0U) == 0,
                  "invalid argument does not consume preparation") ||
-        !require(memcmp(phase_d_backend_transmit_frame(0U), peer.octets,
+        !require(memcmp(network_test_backend_transmit_frame(0U), peer.octets,
                         sizeof(peer.octets)) == 0,
                  "ARP supports unicast destination")) {
         return 0;
     }
 
-    phase_d_backend_clear_transmits();
+    network_test_backend_clear_transmits();
     net_ethernet_begin_tx(&net_global_context);
-    if (!require(phase_d_backend_set_next_send_error(SYS_ERR_UNAVAILABLE) == 0,
+    if (!require(network_test_backend_set_next_send_error(SYS_ERR_UNAVAILABLE) == 0,
                  "inject unavailable") ||
         !require(net_ethernet_send(&net_global_context, &peer,
                                    NET_ETHERTYPE_ARP, 0U) ==
@@ -423,7 +423,7 @@ static int test_transmit_validation_and_errors(void)
         return 0;
     }
     net_ethernet_begin_tx(&net_global_context);
-    if (!require(phase_d_backend_set_next_send_error(SYS_ERR_TIMEOUT) == 0,
+    if (!require(network_test_backend_set_next_send_error(SYS_ERR_TIMEOUT) == 0,
                  "inject raw timeout") ||
         !require(net_ethernet_send(&net_global_context, &peer,
                                    NET_ETHERTYPE_ARP, 0U) == NET_ERR_DEVICE,
@@ -431,7 +431,7 @@ static int test_transmit_validation_and_errors(void)
         return 0;
     }
     net_ethernet_begin_tx(&net_global_context);
-    if (!require(phase_d_backend_set_next_send_error(SYS_ERR_DEVICE) == 0,
+    if (!require(network_test_backend_set_next_send_error(SYS_ERR_DEVICE) == 0,
                  "inject raw reset or failure") ||
         !require(net_ethernet_send(&net_global_context, &peer,
                                    NET_ETHERTYPE_ARP, 0U) == NET_ERR_DEVICE,
@@ -439,10 +439,10 @@ static int test_transmit_validation_and_errors(void)
         return 0;
     }
     net_ethernet_begin_tx(&net_global_context);
-    if (!require(phase_d_backend_set_next_send_result(SYS_ERR_DEVICE) ==
+    if (!require(network_test_backend_set_next_send_result(SYS_ERR_DEVICE) ==
                      SYS_ERR_INVALID,
                  "positive-result injection rejects negative errors") ||
-        !require(phase_d_backend_set_next_send_result(0) == 0,
+        !require(network_test_backend_set_next_send_result(0) == 0,
                  "inject zero send result") ||
         !require(net_ethernet_send(&net_global_context, &peer,
                                    NET_ETHERTYPE_ARP, 0U) == NET_ERR_DEVICE,
@@ -450,7 +450,7 @@ static int test_transmit_validation_and_errors(void)
         return 0;
     }
     net_ethernet_begin_tx(&net_global_context);
-    if (!require(phase_d_backend_set_next_send_result(59) == 0,
+    if (!require(network_test_backend_set_next_send_result(59) == 0,
                  "inject short send") ||
         !require(net_ethernet_send(&net_global_context, &peer,
                                    NET_ETHERTYPE_ARP, 0U) == NET_ERR_DEVICE,
@@ -458,7 +458,7 @@ static int test_transmit_validation_and_errors(void)
         return 0;
     }
     net_ethernet_begin_tx(&net_global_context);
-    if (!require(phase_d_backend_set_next_send_result(61) == 0,
+    if (!require(network_test_backend_set_next_send_result(61) == 0,
                  "inject oversized result") ||
         !require(net_ethernet_send(&net_global_context, &peer,
                                    NET_ETHERTYPE_ARP, 0U) == NET_ERR_DEVICE,

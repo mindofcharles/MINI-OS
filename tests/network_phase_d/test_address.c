@@ -1,4 +1,4 @@
-#include "deterministic_backend.h"
+#include "../network_common/deterministic_backend.h"
 
 #include "../../transport/lib/net/address.h"
 #include "../../transport/lib/net/internal.h"
@@ -246,15 +246,15 @@ static int expect_device_failure(const struct net_device_info *info,
 {
     struct net_config config = valid_config();
 
-    phase_d_backend_reset();
-    if (!require(phase_d_backend_set_device_info(info) == 0,
+    network_test_backend_reset();
+    if (!require(network_test_backend_set_device_info(info) == 0,
                  "configure failing device")) {
         return 0;
     }
     prepare_atomicity_check();
     if (!require(net_init(&config) == expected, message) ||
         !require_unchanged("device failure preserves context") ||
-        !require(phase_d_backend_transmit_count() == 0U,
+        !require(network_test_backend_transmit_count() == 0U,
                  "initialization never transmits")) {
         return 0;
     }
@@ -274,23 +274,23 @@ static int test_init_failures(void)
     };
     unsigned int index;
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     if (!require(net_get_info(&base) == 0, "read default device")) {
         return 0;
     }
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     prepare_atomicity_check();
-    if (!require(phase_d_backend_set_next_info_error(SYS_ERR_UNAVAILABLE) == 0,
+    if (!require(network_test_backend_set_next_info_error(SYS_ERR_UNAVAILABLE) == 0,
                  "inject unavailable query") ||
         !require(net_init(&config) == NET_ERR_UNAVAILABLE,
                  "map unavailable query") ||
         !require_unchanged("unavailable query preserves context")) {
         return 0;
     }
-    phase_d_backend_reset();
+    network_test_backend_reset();
     prepare_atomicity_check();
-    if (!require(phase_d_backend_set_next_info_error(SYS_ERR_TIMEOUT) == 0,
+    if (!require(network_test_backend_set_next_info_error(SYS_ERR_TIMEOUT) == 0,
                  "inject failed query") ||
         !require(net_init(&config) == NET_ERR_DEVICE,
                  "map failed query") ||
@@ -364,10 +364,10 @@ static int test_init_failures(void)
         return 0;
     }
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     prepare_atomicity_check();
     config.arp_retry_count = 0U;
-    if (!require(phase_d_backend_set_next_info_error(SYS_ERR_DEVICE) == 0,
+    if (!require(network_test_backend_set_next_info_error(SYS_ERR_DEVICE) == 0,
                  "arm unused device failure") ||
         !require(net_init(0) == NET_ERR_INVALID,
                  "reject null initialization config") ||
@@ -391,14 +391,14 @@ static int test_init_success(void)
     struct net_config expected = config;
     struct net_device_info info;
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     if (!require(net_get_info(&info) == 0, "query successful device")) {
         return 0;
     }
     info.io_base = 0U;
     info.irq = 0U;
     info.flags |= 0x80000000U;
-    if (!require(phase_d_backend_set_device_info(&info) == 0,
+    if (!require(network_test_backend_set_device_info(&info) == 0,
                  "configure protocol-independent resources")) {
         return 0;
     }
@@ -422,7 +422,7 @@ static int test_init_success(void)
                  net_global_context.pending_arp.active == 0 &&
                  net_global_context.pending_echo.active == 0,
                  "clear protocol state") ||
-        !require(phase_d_backend_transmit_count() == 0U,
+        !require(network_test_backend_transmit_count() == 0U,
                  "successful initialization does not transmit")) {
         return 0;
     }
