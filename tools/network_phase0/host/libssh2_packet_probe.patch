@@ -1,0 +1,21 @@
+diff --git a/src/transport.c b/src/transport.c
+index e112065..ac28e44 100644
+--- a/src/transport.c
++++ b/src/transport.c
+@@ -46,0 +47,4 @@
++#if defined(MINI_OS_PHASE0_PACKET_PROBE)
++extern void mini_os_phase0_record_packet(int outgoing, size_t length);
++#endif
++
+@@ -675,0 +680,6 @@
++#if defined(MINI_OS_PHASE0_PACKET_PROBE)
++            mini_os_phase0_record_packet(0,
++                                         4 + p->packet_length +
++                                         (encrypted && remote_mac ?
++                                          remote_mac->mac_len : 0) + auth_len);
++#endif
+@@ -1158,0 +1169,4 @@
++#if defined(MINI_OS_PHASE0_PACKET_PROBE)
++    mini_os_phase0_record_packet(1, (size_t)total_length);
++#endif
++

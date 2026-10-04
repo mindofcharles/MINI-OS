@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import subprocess
@@ -27,41 +28,78 @@ FAT_LBA = 103
 DATA_BLOCK_COUNT = 4096
 
 
+def platform_layout() -> dict[str, int]:
+    definition = Path(__file__).resolve().parents[1] / "OS_src/kernel/platform_layout.def"
+    pattern = re.compile(
+        r"^PLATFORM_LAYOUT_CONST\(([A-Z0-9_]+),\s*"
+        r"(0x[0-9A-Fa-f]+|[0-9]+)\)$"
+    )
+    values: dict[str, int] = {}
+    for line in definition.read_text(encoding="ascii").splitlines():
+        match = pattern.fullmatch(line)
+        if match is not None:
+            values[match.group(1)] = int(match.group(2), 0)
+    required = {"PLATFORM_CONFIGURED_MEMORY_BYTES", "KERNEL_IMAGE_MAX_SIZE"}
+    missing = required.difference(values)
+    if missing:
+        raise RuntimeError(
+            "platform layout is missing: " + ", ".join(sorted(missing))
+        )
+    return values
+
+
+PLATFORM_LAYOUT = platform_layout()
+CONFIGURED_MEMORY_BYTES = PLATFORM_LAYOUT["PLATFORM_CONFIGURED_MEMORY_BYTES"]
+if CONFIGURED_MEMORY_BYTES == 0 or CONFIGURED_MEMORY_BYTES % (1024 * 1024) != 0:
+    raise RuntimeError("configured guest memory must use whole MiB units")
+QEMU_MEMORY = f"{CONFIGURED_MEMORY_BYTES // (1024 * 1024)}M"
+KERNEL_IMAGE_MAX_SIZE = PLATFORM_LAYOUT["KERNEL_IMAGE_MAX_SIZE"]
+if KERNEL_IMAGE_MAX_SIZE == 0 or KERNEL_IMAGE_MAX_SIZE % 512 != 0:
+    raise RuntimeError("kernel image reservation must use whole sectors")
+KERNEL_MAX_SECTORS = KERNEL_IMAGE_MAX_SIZE // 512
+
+
 def run_checked(command: list[str], cwd: Path) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
 def prepare_debug_image(
-    repo: Path, source: Path, destination: Path, force_chs: bool = False
+    repo: Path, source: Path, destination: Path, force_chs: bool = False,
+    force_a20_failure: bool = False,
+    kernel_defines: Optional[list[str]] = None,
 ) -> None:
     kernel = destination.with_suffix(".kernel.bin")
     boot = destination.with_suffix(".boot.bin")
-    run_checked(
-        [
-            "nasm",
-            "-w-label-redef-late",
-            "-d",
-            "ENABLE_DEBUGCON=1",
-            "-f",
-            "bin",
-            "OS_src/kernel/main.asm",
-            "-o",
-            str(kernel),
-        ],
-        repo,
+    kernel_command = [
+        "nasm",
+        "-w-label-redef-late",
+        "-d",
+        "ENABLE_DEBUGCON=1",
+    ]
+    for definition in kernel_defines or []:
+        kernel_command.extend(["-d", definition])
+    kernel_command.extend(
+        ["-f", "bin", "OS_src/kernel/main.asm", "-o", str(kernel)]
     )
+    run_checked(kernel_command, repo)
     kernel_bytes = kernel.read_bytes()
     sectors = (len(kernel_bytes) + 511) // 512
-    if sectors > 100:
-        raise RuntimeError("debug kernel exceeds the 100-sector boot reservation")
+    if sectors > KERNEL_MAX_SECTORS:
+        raise RuntimeError(
+            f"debug kernel exceeds the {KERNEL_MAX_SECTORS}-sector boot reservation"
+        )
     boot_command = [
         "nasm",
         "-w-label-redef-late",
+        "-d",
+        "ENABLE_DEBUGCON=1",
         "-d",
         f"KERNEL_SECTORS={sectors}",
     ]
     if force_chs:
         boot_command.extend(["-d", "BOOT_FORCE_CHS=1"])
+    if force_a20_failure:
+        boot_command.extend(["-d", "BOOT_FORCE_A20_FAIL=1"])
     boot_command.extend(["-f", "bin", "OS_src/boot/boot.asm", "-o", str(boot)])
     run_checked(boot_command, repo)
     boot_bytes = bytearray(boot.read_bytes())
@@ -80,7 +118,7 @@ def prepare_debug_image(
         image.seek(0)
         image.write(boot_bytes)
         image.seek(512)
-        image.write(b"\0" * (100 * 512))
+        image.write(b"\0" * KERNEL_IMAGE_MAX_SIZE)
         image.seek(512)
         image.write(kernel_bytes)
 
@@ -94,6 +132,7 @@ class VirtualMachine:
         instance: int,
         storage_args: Optional[list[str]] = None,
         extra_args: Optional[list[str]] = None,
+        memory: Optional[str] = None,
     ) -> None:
         self.image = image
         self.log = log
@@ -101,6 +140,7 @@ class VirtualMachine:
         self.instance = instance
         self.storage_args = storage_args
         self.extra_args = extra_args or []
+        self.memory = memory or QEMU_MEMORY
         self.process: Optional[subprocess.Popen[bytes]] = None
 
     def start(
@@ -113,6 +153,8 @@ class VirtualMachine:
         ]
         command = [
             self.qemu,
+            "-m",
+            self.memory,
             *storage_args,
             *self.extra_args,
             "-display",
@@ -269,10 +311,33 @@ def count_free_data_blocks(image: Path) -> int:
     )
 
 
-def smoke_test(vm: VirtualMachine) -> None:
+def small_application_test(vm: VirtualMachine) -> None:
+    segment = vm.command_expect(
+        "run /transport/build/apps/hello.bin",
+        "MINI_OS: app exited cleanly.",
+    )
+    if (
+        "Hello, World from C90 in MINI-OS!" not in segment
+        or "Test number: 42, Hex: 0xff" not in segment
+    ):
+        raise RuntimeError("strict-C90 hello application output changed")
+
+
+def smoke_test(vm: VirtualMachine, program: Optional[str] = None,
+               expected: str = "MINI_OS: app exited cleanly.") -> None:
+    small_application_test(vm)
     vm.command_expect(
         "run /transport/build/lib_test/test_bss.bin", "BSS test: PASS"
     )
+    vm.command_expect(
+        "run /transport/build/lib_test/test_stack.bin", "STACK CANARY TEST: PASS"
+    )
+    vm.command_expect(
+        "run /transport/build/lib_test/test_platform.bin",
+        "PLATFORM TIMER TEST: PASS",
+    )
+    if program is not None:
+        vm.command_expect("run " + program, expected)
     vm.command_expect("pwd", "/ > ")
 
 
@@ -363,6 +428,183 @@ def forced_chs_test(
     check_image(checker, image, repo)
 
 
+def a20_failure_test(repo: Path, source: Path, qemu: str, temp: Path) -> None:
+    image = temp / "mini_os_a20_failure.img"
+    prepare_debug_image(repo, source, image, force_a20_failure=True)
+    vm = VirtualMachine(image, temp / "session-a20-failure.log", qemu, -20)
+    try:
+        vm.start("A")
+    finally:
+        vm.stop()
+
+
+def insufficient_memory_test(
+    repo: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    image = temp / "mini_os_insufficient_memory.img"
+    prepare_debug_image(repo, source, image)
+    vm = VirtualMachine(
+        image,
+        temp / "session-insufficient-memory.log",
+        qemu,
+        -22,
+        memory="1M",
+    )
+    try:
+        vm.start("M")
+    finally:
+        vm.stop()
+
+
+def memory_guard_failure_test(
+    source: Path, qemu: str, temp: Path
+) -> None:
+    for index, guard in enumerate(("kernel", "interrupt", "heap", "application")):
+        image = temp / f"mini_os_{guard}_guard_failure.img"
+        shutil.copy2(source, image)
+        vm = VirtualMachine(
+            image,
+            temp / f"session-{guard}-guard-failure.log",
+            qemu,
+            -23 - index,
+        )
+        try:
+            vm.start()
+            vm.command_expect(
+                "run /transport/build/lib_test/test_guard.bin " + guard,
+                "MINI_OS: platform memory guard failed; system halted.",
+            )
+        finally:
+            vm.stop()
+
+
+def network_run_configuration_test(
+    repo: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    expected_command = (
+        f"qemu-system-i386 -m {QEMU_MEMORY} -accel tcg "
+        "-cpu max,rdrand=on "
+        "-drive file=build/mini_os.img,format=raw,if=ide,index=0,media=disk "
+        "-netdev user,id=net0 "
+        "-device ne2k_isa,netdev=net0,iobase=0x300,irq=9,"
+        "mac=52:54:00:12:34:56"
+    )
+    dry_run = subprocess.run(
+        ["make", "-n", "run-network"],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    if expected_command not in dry_run.stdout.splitlines():
+        raise RuntimeError("make run-network does not expose the Phase A contract")
+
+    image = temp / "mini_os_network_run.img"
+    prepare_debug_image(repo, source, image)
+    vm = VirtualMachine(
+        image,
+        temp / "session-network-run.log",
+        qemu,
+        -21,
+        extra_args=[
+            "-accel",
+            "tcg",
+            "-cpu",
+            "max,rdrand=on",
+            "-netdev",
+            "user,id=net0",
+            "-device",
+            "ne2k_isa,netdev=net0,iobase=0x300,irq=9,mac=52:54:00:12:34:56",
+        ],
+    )
+    try:
+        vm.start()
+        vm.command_expect(
+            "run /transport/build/lib_test/test_platform.bin random",
+            "RANDOM TEST: PASS",
+        )
+        segment = vm.command_expect(
+            "run /transport/build/apps/netdiag.bin",
+            "/ > ",
+        )
+        for expected in (
+            "NE2000 state: ready",
+            "ABI version: 1",
+            "MAC: 52:54:00:12:34:56",
+            "I/O base: 0x300",
+            "IRQ: 9",
+            "MTU: 1500",
+            "Frame bounds: 60-1514",
+            "Driver flags: 0x1f",
+        ):
+            if expected not in segment:
+                raise RuntimeError(
+                    f"network diagnostic omitted {expected!r}:\n{segment}"
+                )
+        vm.command_expect("pwd", "/ > ")
+    finally:
+        vm.stop()
+
+
+def random_unavailable_test(
+    repo: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    cases = (
+        ("feature-off", ["-accel", "tcg", "-cpu", "qemu32,rdrand=off"]),
+        ("no-cpuid", ["-accel", "tcg", "-cpu", "486"]),
+    )
+    for index, (name, extra_args) in enumerate(cases):
+        image = temp / f"mini_os_random_unavailable_{name}.img"
+        prepare_debug_image(repo, source, image)
+        vm = VirtualMachine(
+            image,
+            temp / f"session-random-unavailable-{name}.log",
+            qemu,
+            -28 - index,
+            extra_args=extra_args,
+        )
+        try:
+            vm.start()
+            vm.command_expect(
+                "run /transport/build/lib_test/test_platform.bin unavailable",
+                "RANDOM UNAVAILABLE TEST: PASS",
+            )
+        finally:
+            vm.stop()
+
+
+def exception_handling_test(
+    repo: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    cases = (
+        (
+            "no-error",
+            "KERNEL_TEST_EXCEPTION_NO_ERROR=1",
+            "MINI_OS: fatal exception vector=0x00000000 error=0x00000000; system halted.",
+        ),
+        (
+            "with-error",
+            "KERNEL_TEST_EXCEPTION_ERROR=1",
+            "MINI_OS: fatal exception vector=0x0000000D error=0x00000018; system halted.",
+        ),
+    )
+    for index, (name, definition, expected) in enumerate(cases):
+        image = temp / f"mini_os_exception_{name}.img"
+        prepare_debug_image(
+            repo, source, image, kernel_defines=[definition]
+        )
+        vm = VirtualMachine(
+            image,
+            temp / f"session-exception-{name}.log",
+            qemu,
+            -29 - index,
+        )
+        try:
+            vm.start(expected)
+        finally:
+            vm.stop()
+
+
 def machine_compatibility_test(
     repo: Path, checker: Path, source: Path, qemu: str, temp: Path
 ) -> None:
@@ -398,7 +640,10 @@ def wrong_device_test(
     else:
         raise RuntimeError("debug kernel has no entry stub")
     kernel_start = instruction_size + displacement
-    if kernel_start < instruction_size or kernel_start + 10 >= 100 * 512:
+    if (
+        kernel_start < instruction_size
+        or kernel_start + 10 >= KERNEL_IMAGE_MAX_SIZE
+    ):
         raise RuntimeError("debug kernel entry stub has an invalid target")
     cases = (
         ("boot-code", 100, 0x5A),
@@ -687,6 +932,7 @@ def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> 
     first = VirtualMachine(image, temp / "session-1.log", qemu, 1)
     try:
         first.start()
+        small_application_test(first)
         first.command_expect(
             "run /transport/build/lib_test/test_string.bin",
             "STRING/FORMAT TESTS PASSED",
@@ -696,6 +942,14 @@ def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> 
         )
         first.command_expect(
             "run /transport/build/lib_test/test_bss.bin", "BSS test: PASS"
+        )
+        first.command_expect(
+            "run /transport/build/lib_test/test_stack.bin",
+            "STACK CANARY TEST: PASS",
+        )
+        first.command_expect(
+            "run /transport/build/lib_test/test_platform.bin",
+            "PLATFORM TIMER TEST: PASS",
         )
         first.command_expect(
             "run /transport/build/lib_test/test_file.bin",
@@ -770,6 +1024,8 @@ def main() -> int:
     parser.add_argument("--checker", required=True, type=Path)
     parser.add_argument("--qemu", default="qemu-system-i386")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--program")
+    parser.add_argument("--program-output", default="MINI_OS: app exited cleanly.")
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
@@ -786,13 +1042,19 @@ def main() -> int:
             vm = VirtualMachine(debug_image, temp / "smoke.log", args.qemu, 0)
             try:
                 vm.start()
-                smoke_test(vm)
+                smoke_test(vm, args.program, args.program_output)
             finally:
                 vm.stop()
             check_image(checker, debug_image, repo)
         else:
+            insufficient_memory_test(repo, source_image, args.qemu, temp)
+            a20_failure_test(repo, source_image, args.qemu, temp)
+            exception_handling_test(repo, source_image, args.qemu, temp)
+            network_run_configuration_test(repo, source_image, args.qemu, temp)
+            random_unavailable_test(repo, source_image, args.qemu, temp)
             forced_chs_test(repo, checker, source_image, args.qemu, temp)
             prepare_debug_image(repo, source_image, debug_image)
+            memory_guard_failure_test(debug_image, args.qemu, temp)
             machine_compatibility_test(repo, checker, debug_image, args.qemu, temp)
             wrong_device_test(repo, checker, debug_image, args.qemu, temp)
             invalid_filesystem_boot_test(debug_image, args.qemu, temp)

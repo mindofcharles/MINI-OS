@@ -737,6 +737,7 @@ shell_run:
     je near shell_run_empty
     cmp eax, APP_IMAGE_SIZE
     ja near shell_run_too_large
+    mov [tmp_run_size], eax
 
     add eax, 511
     jc near shell_run_too_large
@@ -756,6 +757,7 @@ shell_run:
     cmp eax, FS_OK
     jl near shell_run_fs_error
 
+    call platform_prepare_app_memory
     mov edi, APP_IMAGE_BASE
     mov ecx, APP_IMAGE_SIZE
     call zero_buffer
@@ -791,6 +793,15 @@ shell_run_load_loop:
     jmp near shell_run_load_loop
 
 shell_run_load_done:
+    ; A sector read also copies bytes beyond the logical end of a partial
+    ; final block. Clear from the exact file end so trailing BSS is always
+    ; zero even when those on-disk padding bytes contain old data.
+    mov edi, APP_IMAGE_BASE
+    add edi, [tmp_run_size]
+    mov ecx, APP_IMAGE_SIZE
+    sub ecx, [tmp_run_size]
+    call zero_buffer
+
     pop edi                       ; tok_arg2
     pop esi                       ; tok_arg1
 
@@ -803,12 +814,12 @@ shell_run_load_done:
     test edi, edi
     jz near .shell_run_argc1
 
-    ; Copy argv[1] string ("001.txt") to 0x0008E050
+    ; Copy argv[1] into the shared argument block.
     mov esi, edi
     mov edi, APP_ARG1_ADDR
     call copy_string
 
-    ; Build argv array at 0x0008E100
+    ; Build the argv pointer array in the shared argument block.
     mov dword [APP_ARGV_ADDR], APP_ARG0_ADDR
     mov dword [APP_ARGV_ADDR + 4], APP_ARG1_ADDR
     mov dword [APP_ARGV_ADDR + 8], 0
@@ -827,7 +838,7 @@ shell_run_load_done:
     ; Save kernel stack
     mov [saved_kernel_esp], esp
 
-    ; Setup user stack at 0x0008F000
+    ; Switch to the bounded application stack.
     mov esp, APP_STACK_TOP
 
     ; Push arguments. The following call supplies [esp+0]=return address,
@@ -835,12 +846,22 @@ shell_run_load_done:
     push dword APP_ARGV_ADDR     ; argv pointer array
     push ecx                     ; argc
 
-    ; Call app at 0x00040000
+    ; Call the application at the shared image base.
     mov eax, APP_IMAGE_BASE
     call eax
 
 return_to_shell:
     mov esp, [saved_kernel_esp]
+    cld
+    sti
+    mov dword [current_brk], APP_HEAP_BASE
+    call platform_verify_guards
+    test eax, eax
+    jnz .guards_ok
+    mov esi, msg_layout_fatal
+    call vga_print
+    jmp kernel_layout_halt
+.guards_ok:
     mov esi, msg_app_finished
     call vga_print
     ret

@@ -10,7 +10,7 @@ Application and executable-test source under `transport/apps/` and `transport/li
 
 The runtime implementation under `transport/lib/` intentionally uses modern C and is built separately.
 
-Flat application binaries are loaded into the 64 KiB region at `0x00040000`, with the stack starting at `0x0008F000`. System calls use the `int 0x80` interrupt gate.
+Flat application binaries are loaded into the 512 KiB region at `0x00100000`, with a 32 KiB stack growing down from `0x001CB000`. System calls use the `int 0x80` trap gate, while hardware IRQs use interrupt gates and a separate 16 KiB interrupt stack.
 
 Applications are not isolated processes. They execute in Ring 0 in the same flat address space as the kernel, so only trusted binaries should be run.
 
@@ -39,7 +39,7 @@ When writing C code for MINI-OS, adhere strictly to C90 syntax:
   *(Do not declare `for (int i = 0; ...)` inside the loop header).*
 
 - **Block Comments**: Use standard C comments (`/* comment */`).
-- **Dynamic Memory Allocation (`malloc`/`free`)**: Applications can dynamically allocate and free heap memory from `0x00050000` to `0x00080000` through `sys_brk` (`EAX=12`).
+- **Dynamic Memory Allocation (`malloc`/`free`)**: Applications can dynamically allocate and free heap memory from `0x00180000` through the exclusive end `0x001C0000` using `sys_brk` (`EAX=12`).
 - **No Floating-Point Operations**: The x87 FPU is not initialized in protected mode, so avoid `float` and `double` arithmetic.
 
 ### 2.2 Standard Library Support (`minilibc`)
@@ -68,10 +68,13 @@ User applications and C library tests are decoupled from the MINI-OS C standard 
 transport/
 ├── lib/                     <-- MINI-OS C Runtime Library & Standard Headers
 │   ├── crt0.asm             <-- Application Startup Entry (_start)
+│   ├── compiler_rt.c        <-- Selected Network Build Compiler Helpers
 │   ├── minilibc.h / .c      <-- Syscall & C Standard Library Implementation
 │   ├── stdio.h / stdlib.h   <-- Standard Header Wrappers
 │   ├── string.h / ctype.h
-│   └── limits.h / stddef.h / assert.h
+│   ├── limits.h / stddef.h / assert.h
+│   ├── net/                 <-- Modern-C Network Implementation
+│   └── ssh/                 <-- Modern-C SSH Implementation
 ├── apps/                    <-- User C Applications
 │   ├── hello.c
 │   ├── calc.c
@@ -83,7 +86,9 @@ transport/
 │   ├── test_heap.c
 │   ├── test_file.c
 │   ├── test_no_space.c
-│   └── test_bss.c
+│   ├── test_bss.c
+│   ├── test_stack.c
+│   └── test_guard.c
 └── build/                   <-- Compiled Output Binaries
     ├── apps/                <-- User App Executables (hello.bin, calc.bin, etc.)
     └── lib_test/            <-- Test Executables for every lib_test source
@@ -100,7 +105,7 @@ int main(void) {
 
     printf("Hello, World from C90 in MINI-OS!\n");
     printf("Test decimal: %d, Hexadecimal: 0x%x\n", count, hex_val);
-    
+
     return 0;
 }
 ```
@@ -118,7 +123,7 @@ MINI-OS uses an automated build toolchain:
 ```
 
 - **C Runtime Startup (`crt0.asm`)**:
-  - `_start` executes at entry point `0x00040000`.
+  - `_start` executes at entry point `0x00100000`.
   - Calls `main()`.
   - Passes `main`'s return value to `sys_exit` via `int 0x80 (EAX=1)`.
 
@@ -209,29 +214,31 @@ sequenceDiagram
 
     Shell->>Loader: Command "run hello.bin"
     Loader->>Loader: Validate size and complete FAT chain
-    Loader->>Loader: Clear 64 KiB image and follow FAT blocks into 0x00040000
+    Loader->>Loader: Clear 512 KiB image, heap, arguments, and stack, then install canaries
+    Loader->>Loader: Follow FAT blocks into 0x00100000 and clear final-sector padding
     Loader->>Loader: Save Shell ESP -> [saved_kernel_esp]
-    Loader->>Loader: Set ESP = 0x0008F000
-    Loader->>App: Jump to 0x00040000 (_start -> main)
+    Loader->>Loader: Set ESP = 0x001CB000
+    Loader->>App: Jump to 0x00100000 (_start -> main)
     App->>IDT: int 0x80 (EAX=4, sys_write)
     IDT->>App: Print output to VGA console & iret
     App->>IDT: int 0x80 (EAX=1, sys_exit)
-    IDT->>Shell: Restore [saved_kernel_esp] & return to prompt
+    IDT->>Shell: Restore [saved_kernel_esp] and verify canaries
+    IDT->>Shell: Return to prompt
 ```
 
 ## 7. Memory Boundaries & Limitations
 
-- **Executable Base**: `0x00040000`
-- **Executable End (exclusive)**: `0x00050000`
-- **Maximum Flat Binary Size**: 64 KiB, including code and initialized static data
-- **Heap**: `0x00050000` through `0x00080000`
-- **Argument Strings / `argv`**: `0x0008E000` through the pointer table at `0x0008E100`
-- **Application Stack**: `0x0008F000` (grows downwards)
+- **Executable Base**: `0x00100000`
+- **Executable End (exclusive)**: `0x00180000`
+- **Maximum Allocatable Image Footprint**: 512 KiB, including code, initialized data, and zero-initialized placement
+- **Heap**: `0x00180000` through the exclusive end `0x001C0000`
+- **Argument Strings / `argv`**: the 4 KiB block `0x001C1000..0x001C1FFF`
+- **Application Stack**: `0x001C3000..0x001CAFFF`, growing down from `0x001CB000`
 - **System Call ABI**: register inputs, return values, flags, and all implemented call numbers are specified in [`Syscall_ABI.md`](Syscall_ABI.md).
-  
+
   Applications execute in Ring 0, so the ABI organizes services but provides no pointer or privilege isolation.
 
-The loader clears the full executable region before each run so zero-initialized static storage starts at zero. The flat-binary producer must preserve section placement so every zero-initialized symbol remains inside the 64 KiB application image.
+The loader clears the full executable region before each run so zero-initialized static storage starts at zero. The flat-binary producer must preserve section placement so every zero-initialized symbol remains inside the 512 KiB application image.
 
 `ld.lld --oformat binary` may omit trailing zero-only bytes; this is safe because the loader clears the entire image.
 
@@ -239,8 +246,16 @@ The `elf2bin` fallback explicitly materializes `SHT_NOBITS` placement and checks
 
 The format has no runtime relocation or segment metadata.
 
+Application startup calls `main` directly and does not run constructor or destructor arrays. Both flat-binary producers therefore reject nonempty `.preinit_array`, `.init_array`, `.fini_array`, `.ctors`, and `.dtors` sections instead of silently producing an executable with incomplete startup semantics.
+
+The runtime also has no thread-pointer setup, so both producers reject thread-local storage sections instead of accepting code whose TLS addresses would be invalid.
+
 The executable regression `transport/lib_test/test_bss.c` checks 12 KiB of zero-initialized static arrays and their writability. Run it with:
 
 ```text
 run /transport/build/lib_test/test_bss.bin
 ```
+
+The executable regression `transport/lib_test/test_stack.c` actively uses 28 KiB of the 32 KiB application stack, and the kernel verifies the adjacent canary before returning to the shell.
+
+The negative regression `transport/lib_test/test_guard.c` selects and corrupts each kernel-stack, interrupt-stack, application-heap, and application-stack canary in a separate isolated boot and proves that every case enters the kernel's non-returning memory-failure path.

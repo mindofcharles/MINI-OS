@@ -26,6 +26,7 @@ Before testing on physical hardware, ensure all of the following:
 
 - Boot mode is Legacy BIOS or CSM rather than UEFI-only.
 - Secure Boot is disabled.
+- BIOS `INT 12h` reports at least 596 KiB of conventional memory, and BIOS `INT 15h/AH=88h` reports at least 812 KiB of contiguous extended memory beginning at one MiB.
 - The USB drive is selected in the legacy boot menu.
 - The image is written to the whole USB device rather than to a partition.
 - After boot, firmware and chipset compatibility expose that same medium as the primary legacy ATA/IDE master (`0x1F0..0x1F7`).
@@ -139,6 +140,10 @@ If you only see a blinking cursor, use the troubleshooting section below.
 
 If kernel loading fails after all EDD and CHS attempts, the bootloader prints `F` and halts.
 
+If the firmware does not report both RAM spans required by the fixed physical layout, the bootloader prints `M` and halts before loading the kernel.
+
+If the fast A20 gate cannot make physical addresses one MiB apart remain distinct, the bootloader prints `A` and halts before entering protected mode.
+
 The loader probes EDD and retries one sector at a time. If EDD is unavailable or repeatedly fails, it restarts the complete kernel load through CHS.
 
 A successful BIOS loading stage does not prove that the later ATA driver can address the same device.
@@ -170,6 +175,7 @@ If needed, add a single character print at the very top of `OS_src/boot/boot.asm
 ## 8. Real-Hardware Compatibility Notes (Current Project State)
 
 - The boot sector probes INT 13h extensions and otherwise uses a corrected CHS fallback; both paths issue one-sector requests with bounded retries.
+- The boot sector checks the exact conventional and contiguous extended RAM spans used by the current fixed layout, but it does not parse a complete E820 memory map.
 - Disk I/O in protected mode uses only primary-master ATA PIO ports (`0x1F0..0x1F7`) and does not remap the BIOS boot device.
 - The kernel verifies the image identity before mount and refuses mismatches.
 - QEMU is launched with the image explicitly attached as IDE index 0.

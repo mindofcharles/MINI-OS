@@ -1,11 +1,16 @@
 [bits 16]
-[org 0x7c00]
+
+%define PLATFORM_LAYOUT_CONST(name, value) name equ value
+%include "OS_src/kernel/platform_layout.def"
+%undef PLATFORM_LAYOUT_CONST
+
+[org BOOT_IMAGE_BASE]
 
 ; Kernel load target physical address starts at 0x8000.
 ; We keep offset=0 and grow segment by 0x20 per sector (512 bytes),
 ; so the transfer buffer never crosses a 64 KiB boundary in one request.
-KERNEL_LOAD_SEG equ 0x0800
-KERNEL_ENTRY    equ 0x8000
+KERNEL_LOAD_SEG equ KERNEL_IMAGE_BASE >> 4
+KERNEL_ENTRY    equ KERNEL_IMAGE_BASE
 
 %define FS_LAYOUT_CONST(name, value) name equ value
 %include "OS_src/kernel/fs/layout.def"
@@ -20,6 +25,72 @@ KERNEL_ENTRY    equ 0x8000
 %ifndef KERNEL_SECTORS
 KERNEL_SECTORS  equ 32
 %endif
+%if BOOT_IMAGE_BASE != 0x00007C00 || BOOT_IMAGE_END - BOOT_IMAGE_BASE != 512
+    %error "BIOS boot image range is invalid"
+%endif
+%if KERNEL_SECTORS <= 0 || KERNEL_SECTORS > 255
+    %error "kernel sector count must fit the bootloader byte counter"
+%endif
+%if KERNEL_SECTORS * 512 > KERNEL_IMAGE_MAX_SIZE
+    %error "kernel sector count exceeds the reserved image range"
+%endif
+%if KERNEL_IMAGE_BASE & 0xF
+    %error "kernel image base must be paragraph aligned"
+%endif
+%if BOOT_STACK_TOP != BOOT_IMAGE_BASE
+    %error "boot stack must end at the boot image"
+%endif
+%if KERNEL_IMAGE_END - KERNEL_IMAGE_BASE != KERNEL_IMAGE_MAX_SIZE
+    %error "kernel image reservation is inconsistent"
+%endif
+%if KERNEL_IMAGE_MAX_SIZE & 0x1FF
+    %error "kernel image reservation must use whole sectors"
+%endif
+%if KERNEL_IMAGE_BASE < BOOT_IMAGE_END
+    %error "kernel image overlaps the boot image"
+%endif
+%if KERNEL_IMAGE_END > PLATFORM_REQUIRED_CONVENTIONAL_END
+    %error "kernel image exceeds required conventional memory"
+%endif
+%if LEGACY_MEMORY_BASE != 0x000A0000 || LEGACY_MEMORY_END != 0x00100000
+    %error "legacy x86 memory boundaries are invalid"
+%endif
+%if A20_TEST_HIGH_ADDR - A20_TEST_LOW_ADDR != 0x00100000
+    %error "A20 test addresses must be exactly one MiB apart"
+%endif
+%if A20_TEST_LOW_ADDR > 0xFFFF
+    %error "A20 low test address is not representable as a real-mode offset"
+%endif
+%if A20_TEST_HIGH_ADDR < 0xFFFF0
+    %error "A20 high test address is below the selected real-mode segment"
+%endif
+%if A20_TEST_HIGH_ADDR - 0xFFFF0 > 0xFFFF
+    %error "A20 high test address is not representable in real mode"
+%endif
+%if PLATFORM_REQUIRED_CONVENTIONAL_END & 0x3FF
+    %error "required conventional memory must use the BIOS KiB granularity"
+%endif
+%if PLATFORM_REQUIRED_CONVENTIONAL_END > LEGACY_MEMORY_BASE
+    %error "required conventional memory extends into legacy memory"
+%endif
+%if PLATFORM_REQUIRED_EXTENDED_END <= LEGACY_MEMORY_END
+    %error "required extended memory must end above one MiB"
+%endif
+%if PLATFORM_REQUIRED_EXTENDED_END > PLATFORM_CONFIGURED_MEMORY_BYTES
+    %error "required extended memory exceeds configured guest memory"
+%endif
+%if PLATFORM_CONFIGURED_MEMORY_BYTES & 0xFFFFF
+    %error "configured guest memory must use whole MiB units"
+%endif
+%if (PLATFORM_REQUIRED_EXTENDED_END - LEGACY_MEMORY_END) & 0x3FF
+    %error "required extended memory must use the BIOS KiB granularity"
+%endif
+%if ((PLATFORM_REQUIRED_EXTENDED_END - LEGACY_MEMORY_END) >> 10) > 0xFFFF
+    %error "required extended memory exceeds the BIOS AH=88h range"
+%endif
+%if A20_TEST_HIGH_ADDR >= PLATFORM_REQUIRED_EXTENDED_END
+    %error "A20 test address lies outside required extended memory"
+%endif
 
 start:
     cli
@@ -27,15 +98,53 @@ start:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x7c00
+    mov sp, BOOT_STACK_TOP
     sti
 
     mov [boot_drive], dl
 
+    ; Prove that the low kernel-owned regions and the complete high-memory
+    ; application area fit in firmware-reported contiguous memory before
+    ; loading the kernel or entering protected mode.
+    int 0x12
+    cmp ax, PLATFORM_REQUIRED_CONVENTIONAL_END >> 10
+    jb memory_fail
+    mov ah, 0x88
+    int 0x15
+    jc memory_fail
+    cmp ax, (PLATFORM_REQUIRED_EXTENDED_END - LEGACY_MEMORY_END) >> 10
+    jb memory_fail
+
     call load_kernel
     jc boot_fail
 
+    ; Enable the fast A20 gate, then prove that addresses one MiB apart do
+    ; not alias before protected-mode code can load an application there.
     cli
+    in al, 0x92
+    or al, 0x02
+    and al, 0xFE
+    out 0x92, al
+
+    xor ax, ax
+    mov ds, ax
+    mov si, A20_TEST_LOW_ADDR
+    mov ax, 0xFFFF
+    mov es, ax
+    mov di, A20_TEST_HIGH_ADDR - 0xFFFF0
+    mov al, [si]
+    mov ah, [es:di]
+    mov byte [si], 0x00
+    mov byte [es:di], 0xFF
+    cmp byte [si], 0xFF
+    mov [es:di], ah
+    mov [si], al
+%ifdef BOOT_FORCE_A20_FAIL
+    jmp a20_fail
+%else
+    je a20_fail
+%endif
+
     lgdt [gdt_descriptor]
 
     mov eax, cr0
@@ -44,10 +153,24 @@ start:
     jmp 0x08:init_pm
 
 boot_fail:
-    mov ax, 0x0e46
+    mov al, 'F'
+.print:
     xor bx, bx
+%ifdef ENABLE_DEBUGCON
+    out 0xE9, al
+%else
+    mov ah, 0x0E
     int 0x10
+%endif
     jmp $
+
+a20_fail:
+    mov al, 'A'
+    jmp boot_fail.print
+
+memory_fail:
+    mov al, 'M'
+    jmp boot_fail.print
 
 ; ----------------------------
 ; Disk loading strategy
@@ -102,23 +225,15 @@ detect_edd:
 ; OUT: CF clear on success
 load_kernel_edd:
     mov word [load_seg], KERNEL_LOAD_SEG
-    mov dword [load_lba_low], 1
-    mov dword [load_lba_high], 0
-    mov word [load_remaining], KERNEL_SECTORS
+    mov byte [load_remaining], KERNEL_SECTORS
 
 .next_sector:
-    cmp word [load_remaining], 0
-    je .ok
-
     mov byte [retry_count], 3
 .retry:
+    ; Some BIOS implementations report a partial count in this field.
     mov word [disk_packet + 2], 1
     mov ax, [load_seg]
     mov [disk_packet + 6], ax
-    mov eax, [load_lba_low]
-    mov [disk_packet + 8], eax
-    mov eax, [load_lba_high]
-    mov [disk_packet + 12], eax
 
     mov ah, 0x42
     mov dl, [boot_drive]
@@ -134,12 +249,9 @@ load_kernel_edd:
 
 .read_ok:
     add word [load_seg], 0x20
-    inc dword [load_lba_low]
-    jnz .cont
-    inc dword [load_lba_high]
-.cont:
-    dec word [load_remaining]
-    jmp .next_sector
+    inc dword [disk_packet + 8]
+    dec byte [load_remaining]
+    jnz .next_sector
 
 .ok:
     clc
@@ -173,17 +285,12 @@ load_kernel_chs:
     mov [heads], ax
 
     mov word [load_seg], KERNEL_LOAD_SEG
-    mov dword [load_lba_low], 1
-    mov word [load_remaining], KERNEL_SECTORS
+    mov word [load_lba], 1
+    mov byte [load_remaining], KERNEL_SECTORS
 
 .next_sector:
-    cmp word [load_remaining], 0
-    je .ok
-
-    mov ax, [spt]
     xor dx, dx
-    mov si, [load_lba_low]
-    mov ax, si
+    mov ax, [load_lba]
     div word [spt]               ; AX=tmp, DX=sector-1
     inc dl                       ; sector in [1..spt]
     mov [chs_sector], dl
@@ -221,9 +328,9 @@ load_kernel_chs:
 
 .read_ok:
     add word [load_seg], 0x20
-    inc word [load_lba_low]
-    dec word [load_remaining]
-    jmp .next_sector
+    inc word [load_lba]
+    dec byte [load_remaining]
+    jnz .next_sector
 
 .ok:
     clc
@@ -268,7 +375,7 @@ init_pm:
     mov fs, ax
     mov gs, ax
 
-    mov ebp, 0x90000
+    mov ebp, KERNEL_STACK_TOP
     mov esp, ebp
 
     jmp KERNEL_ENTRY
@@ -278,9 +385,8 @@ boot_drive db 0
 retry_count db 0
 
 load_seg    dw KERNEL_LOAD_SEG
-load_lba_low  dd 1
-load_lba_high dd 0
-load_remaining dw 0
+load_lba    dw 1
+load_remaining db 0
 
 spt       dw 0
 heads     dw 0

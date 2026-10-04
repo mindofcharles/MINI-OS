@@ -9,46 +9,70 @@
 - Probes BIOS EDD support and loads the kernel one sector at a time with three attempts per sector and disk resets between failed attempts.
 - Falls back to BIOS CHS reads when EDD is unavailable or its read path fails.
 - Advances the destination segment by 512 bytes per request, so no BIOS transfer buffer crosses a 64 KiB segment boundary.
+- Requires firmware-reported conventional RAM through `0x00095000` and contiguous extended RAM through `0x001CB000` before loading the kernel or using the protected-mode fixed regions.
+- Enables the fast A20 gate and verifies that physical addresses one MiB apart no longer alias before entering protected mode.
 - Initializes temporary execution environment (segments/stack/GDT).
 - Carries the host-generated image identity in immutable boot-sector bytes.
 - Performs protected-mode transition.
 
-### Layer 1: Kernel Core, IDT Syscalls, and Shell
+### Layer 1: Kernel Core, Interrupts, IDT Syscalls, and Shell
 
 - File: `OS_src/kernel/main.asm`
-- Initializes console and IDT interrupt table.
+- Initializes the console, the complete IDT, the secure-random capability probe, the remapped PIC, the dedicated interrupt-stack path, and the PIT before enabling maskable interrupts, then probes the polling NE2000 transport after the PIT clock is live.
 - Verifies that the primary-master ATA target matches the BIOS-loaded image, then requires a clean, valid filesystem.
 - Enters perpetual REPL shell loop.
 
 - File: `OS_src/kernel/idt.asm`
 - Manages 256-entry IDT table at physical memory `0x00026000`.
-- Implements the `int 0x80` system call handler for console I/O, heap control, filesystem streams, and cursor services. Calls 1, 3--7, 12, 14, 15, and 19--25 are implemented. The complete register, return-value, flag, and error contract is in [`Syscall_ABI.md`](Syscall_ABI.md).
+- Installs fatal defaults for every vector, normalized processor-exception entries for vectors 0 through 31, remapped hardware-IRQ entries for vectors `0x20..0x2F`, and the `int 0x80` trap gate.
+- Implements the system call handler for console I/O, heap control, filesystem streams, cursor services, monotonic time, nonblocking keyboard polling, secure random bytes, and raw Ethernet frames. Calls 1, 3--7, 12, 14, 15, and 19--31 are implemented. The complete register, return-value, flag, and error contract is in [`Syscall_ABI.md`](Syscall_ABI.md).
+
+- File: `OS_src/kernel/interrupts.asm`
+- Normalizes exception frames with and without hardware error codes and reports fatal vector/error diagnostics.
+- Remaps the master and slave 8259 PICs to vectors `0x20` and `0x28`, masks every line except IRQ0, uses one EOI path, and runs non-nested IRQ handlers on the dedicated interrupt stack.
+- Performs an interrupt-disabled startup self-test covering IRQ0, a masked master IRQ, a masked slave IRQ, exact master/slave EOI counts, complete interrupted-context restoration, and canary preservation.
+
+- File: `OS_src/kernel/timer.asm`
+- Programs PIT channel 0 in rate-generator mode with divisor 1,193 and advances a wrapping 32-bit millisecond counter on IRQ0.
+
+- File: `OS_src/kernel/random.asm`
+- Detects CPUID before testing the RDRAND feature bit and implements bounded all-or-nothing random fills with no fallback source.
 
 - File: `OS_src/kernel/shell.asm`
 - Tokenizes command line (`cmd arg1 arg2`).
 - Dispatches operations to filesystem wrappers and executable loader (`run`).
-- Implements `shell_run`: validates and follows an executable FAT chain, loads a maximum 64 KiB image at `0x00040000`, switches the stack to `0x0008F000`, and executes it.
+- Implements `shell_run`: validates and follows an executable FAT chain, loads a maximum 512 KiB image at `0x00100000`, switches to the bounded application stack ending at `0x001CB000`, and executes it.
 - Converts error codes into user-facing messages.
 
 ### Layer 2: Drivers
 
+- Files: `OS_src/kernel/net.asm` and the modules under `OS_src/kernel/net/ne2k/`
+- The network entry point orders implementation modules for definitions, lifecycle, Remote DMA, public frame operations, and persistent state.
+- Fixed-resource NE2000 reset, PROM identification, MAC extraction, word-wide Remote DMA, packet-RAM programming, synchronous transmission, nonblocking receive-ring polling, ring-wrap validation, capacity drops, overrun recovery, bounded reset, and stable diagnostics.
+- Keeps NIC IRQ delivery and PIC IRQ9 masked, while PIT IRQ0 continues to provide timeout progress through the syscall trap gate.
+- Exposes normalized 60-through-1,514-byte frames without preamble, SFD, or FCS; the complete contract is in [`Network_Raw_Transport.md`](Network_Raw_Transport.md).
+
 - File: `OS_src/kernel/drivers.asm`
 - ATA PIO sector read/write (`LBA28`, primary-channel master only) with bounded readiness waits and `ERR`/`DF` propagation.
-- Polling IBM PC/AT Set 1 keyboard input using a US-layout mapping.
+- Blocking and nonblocking IBM PC/AT Set 1 keyboard polling using a shared US-layout translator.
 - VGA text-mode rendering and cursor control.
 
 ### Layer 3: Storage and Utilities
 
 - File: `OS_src/kernel/fs/*.asm`
-  
+
   Implements metadata lifecycle, path handling, directory mutation, and inode/block allocation.
 
 - File: `OS_src/kernel/utils.asm`
-  
-  Shared low-level primitives: zero/copy/string/compare helpers.
+
+  Shared low-level primitives: zero/copy/string/compare helpers plus memory-region initialization and canary verification.
+
+- File: `OS_src/kernel/platform_layout.def`
+
+  Single source of truth for boot, kernel, buffer, image, heap, argument, stack, canary, configured-memory, and firmware-required-memory constants.
 
 - File: `tools/inject_transport.c`
-  
+
   Host-side C tool that parses MINI-OS filesystem structures and injects the host `transport/` tree at `/transport/` during `make`.
 
   It performs all changes on a same-directory temporary copy and exposes them with a final atomic rename.
@@ -103,17 +127,41 @@ The marker detects an ambiguous result, but it does not guarantee that earlier s
 
 - Resolve the file inode through path lookup.
 - Verify that the target is a regular file (`type == 1`).
-- Require a nonzero byte size no greater than 64 KiB and an exact `ceil(size / 512)` block count.
+- Require a nonzero byte size no greater than 512 KiB and an exact `ceil(size / 512)` block count.
 - Validate the complete FAT chain, including range, cycle, and final-EOC checks, before changing the application image.
-- Clear `0x00040000..0x0004FFFF`, then follow the FAT chain and read each data block into `0x00040000 + i * 512`.
-- Copy bounded argument strings and build `argv` at `0x0008E000`.
+- Clear `0x00100000..0x0017FFFF`, then follow the FAT chain and read each data block into `0x00100000 + i * 512`.
+- Clear the application heap, argument block, and stack, then install adjacent heap and stack canaries before execution.
+- Copy bounded argument strings and build `argv` in `0x001C1000..0x001C1FFF`.
 - Save the shell stack pointer in `[saved_kernel_esp]`.
-- Set `esp = 0x0008F000` and call `0x00040000`.
+- Set `esp = 0x001CB000` and call `0x00100000`.
 - On `sys_exit` (`int 0x80`, `eax=1`), restore `[saved_kernel_esp]` in `syscall_entry` and jump to `return_to_shell`.
+- Before returning to the prompt, verify the kernel-stack, interrupt-stack, heap, and application-stack canaries and halt on corruption.
 
 Applications are trusted Ring 0 code in the kernel's flat address space.
 
 The syscall ABI organizes application access to kernel services, but it does not provide privilege or memory isolation.
+
+### Interrupt Delivery and Time
+
+Processor exceptions enter normalized fatal handling with a vector and error-code pair, including an inserted zero for exceptions that do not receive a hardware error code.
+
+Every hardware IRQ first saves general-purpose and segment registers on the interrupted stack, installs the known flat data selector, switches to `0x00095000` as the top of the dedicated interrupt stack, dispatches with IF clear, sends EOI through the single PIC path, restores the original stack and registers, and returns with `iretd`.
+
+Only PIT IRQ0 is unmasked. The handler increments a 32-bit counter once per approximately one-millisecond period and sends one master EOI, while the common slave path sends one slave EOI followed by one master EOI.
+
+The syscall descriptor is a trap gate so timer IRQs can interrupt trusted application system calls, including ATA-backed file reads. Other IRQ gates remain interrupt gates, and the common entry treats attempted maskable nesting as fatal.
+
+Secure random requests are independent of the timer. They use CPUID-qualified RDRAND with a ten-attempt bound for every 32-bit word, return only complete fills, and clear the requested destination on source failure.
+
+### Raw Ethernet Frame Transfer
+
+At startup, the kernel treats NE2000 absence as an optional-device state rather than a boot failure, while a valid device is reset, identified through its duplicated PROM, and programmed with a six-page transmit area and bounded receive ring.
+
+Transmit syscalls copy the complete normalized frame into the fixed kernel transmit buffer, complete the DP8390D-required dummy Remote Read, start Remote Write, and then return only after device completion or one bounded recovery attempt.
+
+Receive syscalls inspect at most one ring entry, validate its status, next-page pointer, byte count, normalized size, and calculated page advance, then either copy the frame, consume an over-capacity frame, or reset uncertain ring state.
+
+The driver uses the fixed buffers at `0x00027000` and `0x00028000`, including private odd-byte alignment space for an even RBCR transfer count, and never exposes NE2000 page addresses or registers through the C API.
 
 ### Path Resolution
 
@@ -131,26 +179,11 @@ The syscall ABI organizes application access to kernel services, but it does not
 - Update the inode parent and name.
 - Clear the source entry.
 
-## Memory Map & Static Buffers
+## Memory Map and Static Buffers
 
-The kernel uses explicit physical memory regions for buffers and execution:
+The checked physical map, firmware gates, initialization lifecycle, guard behavior, and current isolation limits are defined in [`Memory_Layout.md`](Memory_Layout.md).
 
-- `0x00007C00`: Bootloader MBR
-- `0x00008000`: Kernel code & data (`kernel.bin`)
-- `0x00020000`: `BUF_SUPERBLOCK`
-- `0x00021000`: `BUF_BITMAP`
-- `0x00022000`: `BUF_SECTOR`
-- `0x00023000`: `BUF_TEXT`
-- `0x00024000`: `BUF_INODE`
-- `0x00025000`: `BUF_CMD`
-- `0x00026000`: `IDT_BASE` (2048-byte IDT table)
-- `0x00040000..0x0004FFFF`: Application image (64 KiB maximum)
-- `0x00050000..0x0007FFFF`: Application heap
-- `0x0008E000..0x0008E10B`: Argument strings and `argv` pointers
-- `0x0008F000`: Application Stack Pointer (grows downwards)
-- `0x00090000`: Kernel Stack Pointer (grows downwards)
-
-This avoids dynamic memory management and keeps flows explicit.
+The QEMU configuration remains 4 MiB, while the bootloader separately verifies only the conventional and extended spans that the current fixed allocations actually touch.
 
 ## Error Strategy
 

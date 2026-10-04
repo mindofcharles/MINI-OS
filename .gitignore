@@ -22,6 +22,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+!transport/lib/
+!transport/lib/**
 parts/
 sdist/
 var/

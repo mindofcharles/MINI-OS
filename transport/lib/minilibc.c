@@ -1,4 +1,5 @@
 #include "minilibc.h"
+#include "platform.h"
 #include <stdarg.h>
 #include <limits.h>
 
@@ -46,6 +47,39 @@ int getchar(void) {
         : "memory"
     );
     return key;
+}
+
+unsigned int clock_monotonic_ms(void) {
+    unsigned int milliseconds;
+    __asm__ __volatile__ (
+        "int $0x80"
+        : "=a"(milliseconds)
+        : "a"(SYS_NR_CLOCK_MONOTONIC_MS)
+        : "memory"
+    );
+    return milliseconds;
+}
+
+int kbd_poll_key(void) {
+    int key;
+    __asm__ __volatile__ (
+        "int $0x80"
+        : "=a"(key)
+        : "a"(SYS_NR_KBD_POLL_KEY)
+        : "memory"
+    );
+    return key;
+}
+
+int get_random(void *buffer, unsigned int length) {
+    int result;
+    __asm__ __volatile__ (
+        "int $0x80"
+        : "=a"(result)
+        : "a"(SYS_NR_GET_RANDOM), "b"(buffer), "c"(length)
+        : "memory"
+    );
+    return result;
 }
 
 

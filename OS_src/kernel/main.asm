@@ -1,5 +1,10 @@
 [bits 32]
-[org 0x8000]
+
+%define PLATFORM_LAYOUT_CONST(name, value) name equ value
+%include "OS_src/kernel/platform_layout.def"
+%undef PLATFORM_LAYOUT_CONST
+
+[org KERNEL_IMAGE_BASE]
 
 ; ----------------------------
 ; Kernel entry and constants
@@ -34,6 +39,10 @@ KBD_DATA_PORT       equ 0x60
 %include "transport/lib/syscall.def"
 %undef SYSCALL_CONST
 
+%define NET_RAW_CONST(name, value) name equ value
+%include "transport/lib/net/raw.def"
+%undef NET_RAW_CONST
+
 FS_OK                equ 0
 FS_ERR_NOT_FOUND     equ -1
 FS_ERR_EXISTS        equ -2
@@ -53,16 +62,32 @@ FS_MAX_DEPTH         equ 32
 FS_FAT_EOC           equ 0xFFFF
 FS_MAX_FILE_SIZE     equ FS_DATA_BLOCK_COUNT * 512
 
-APP_IMAGE_BASE       equ 0x00040000
-APP_IMAGE_END        equ 0x00050000
-APP_IMAGE_SIZE       equ APP_IMAGE_END - APP_IMAGE_BASE
 APP_IMAGE_MAX_BLOCKS equ APP_IMAGE_SIZE / 512
-APP_ARG0_ADDR        equ 0x0008E000
-APP_ARG0_CAP         equ 0x50
-APP_ARG1_ADDR        equ 0x0008E050
-APP_ARG1_CAP         equ 0xB0
-APP_ARGV_ADDR        equ 0x0008E100
-APP_STACK_TOP        equ 0x0008F000
+
+%if APP_IMAGE_END - APP_IMAGE_BASE != APP_IMAGE_SIZE
+    %error "application image range does not match APP_IMAGE_SIZE"
+%endif
+%if APP_HEAP_END - APP_HEAP_BASE != APP_HEAP_SIZE
+    %error "application heap range does not match APP_HEAP_SIZE"
+%endif
+%if APP_STACK_TOP - APP_STACK_BASE != APP_STACK_SIZE
+    %error "application stack range does not match APP_STACK_SIZE"
+%endif
+%if (KERNEL_STACK_TOP - KERNEL_STACK_BASE) & 3
+    %error "kernel stack size must use whole dwords"
+%endif
+%if MEMORY_CANARY_VALUE <= 0 || MEMORY_CANARY_VALUE > 0xFF
+    %error "memory canary must be one nonzero byte"
+%endif
+%if APP_STACK_TOP > PLATFORM_REQUIRED_EXTENDED_END
+    %error "application layout exceeds required extended memory"
+%endif
+%if PLATFORM_REQUIRED_EXTENDED_END > PLATFORM_CONFIGURED_MEMORY_BYTES
+    %error "required memory exceeds configured guest memory"
+%endif
+%if APP_IMAGE_BASE < LEGACY_MEMORY_END
+    %error "application image overlaps legacy low memory"
+%endif
 
 INODE_SIZE          equ 64
 INODE_NAME_LEN      equ 27
@@ -81,17 +106,11 @@ DIR_ENTRY_NAME_LEN  equ 27
 FS_NAME_MAX         equ DIR_ENTRY_NAME_LEN - 1
 DIR_ENTRIES_PER_BLK equ 16
 
-BOOT_CODE_ADDR      equ 0x00007C00
+BOOT_CODE_ADDR      equ BOOT_IMAGE_BASE
 BOOT_CODE_CHECK_LEN equ 256
 BOOT_VOLUME_ID_ADDR equ BOOT_CODE_ADDR + FS_BOOT_ID_OFFSET
 KERNEL_CODE_CHECK_LEN equ 64
 
-BUF_SUPERBLOCK      equ 0x20000
-BUF_BITMAP          equ 0x21000
-BUF_SECTOR          equ 0x22000
-BUF_TEXT            equ 0x23000
-BUF_INODE           equ 0x24000
-BUF_CMD             equ 0x25000
 PATH_PARENT_BUF     equ BUF_TEXT
 PATH_NAME_BUF       equ BUF_TEXT + 256
 PATH_PART_BUF       equ BUF_TEXT + 512
@@ -147,10 +166,13 @@ tmp_edit_detached   db 0
 tmp_edit_allocated  db 0
 tmp_run_path        dd 0
 tmp_run_arg         dd 0
+tmp_run_size        dd 0
 tmp_run_block       dd 0
 tmp_run_blocks      dd 0
 tmp_run_index       dd 0
 saved_kernel_esp    dd 0
+layout_test_esp     dd 0
+layout_guard_result dd 0
 fs_mutation_active  db 0
 fs_mutation_touched db 0
 fs_io_poisoned      db 0
@@ -159,12 +181,53 @@ tmp_mutation_result dd 0
 kernel_start:
     cli
     cld
+
+    ; No return address or live frame exists because the bootloader jumped to
+    ; the image entry. Initialize the complete kernel stack and its lower
+    ; canary before the first call, so early stack corruption remains visible.
+    mov edi, KERNEL_STACK_CANARY_BASE
+    mov ecx, KERNEL_STACK_CANARY_SIZE
+    mov al, MEMORY_CANARY_VALUE
+    rep stosb
+    mov edi, KERNEL_STACK_BASE
+    mov ecx, (KERNEL_STACK_TOP - KERNEL_STACK_BASE) / 4
+    xor eax, eax
+    rep stosd
+
     call vga_clear
+
+    call platform_layout_initialize
+    test eax, eax
+    jnz .layout_ready
+    mov esi, msg_layout_fatal
+    call vga_print
+    jmp kernel_layout_halt
+.layout_ready:
 
     mov esi, msg_boot
     call vga_print
 
     call idt_init
+%ifdef KERNEL_TEST_EXCEPTION_NO_ERROR
+    xor edx, edx
+    mov eax, 1
+    div edx
+%endif
+%ifdef KERNEL_TEST_EXCEPTION_ERROR
+    mov ax, 0x18
+    mov ds, ax
+%endif
+    call random_initialize
+    call interrupts_initialize
+    test eax, eax
+    jnz .interrupts_ready
+    mov esi, msg_interrupt_fatal
+    call vga_print
+    jmp kernel_interrupt_halt
+.interrupts_ready:
+    sti
+    nop
+    call ne2k_initialize
     call fs_bootstrap
     cmp eax, FS_OK
     je .fs_ready
@@ -180,6 +243,14 @@ kernel_start:
     call vga_print
 
 shell_loop:
+    cld
+    call platform_verify_guards
+    test eax, eax
+    jnz .guards_ok
+    mov esi, msg_layout_fatal
+    call vga_print
+    jmp kernel_layout_halt
+.guards_ok:
     mov esi, cwd_path
     call vga_print
     mov esi, msg_prompt_suffix
@@ -201,6 +272,20 @@ kernel_fs_halt:
     hlt
     jmp kernel_fs_fatal
 
+kernel_layout_halt:
+    cli
+    hlt
+    jmp kernel_layout_halt
+
+kernel_interrupt_halt:
+    cli
+    hlt
+    jmp kernel_interrupt_halt
+
+%include "OS_src/kernel/timer.asm"
+%include "OS_src/kernel/random.asm"
+%include "OS_src/kernel/interrupts.asm"
+%include "OS_src/kernel/net.asm"
 %include "OS_src/kernel/idt.asm"
 %include "OS_src/kernel/shell.asm"
 %include "OS_src/kernel/fs.asm"
@@ -211,6 +296,8 @@ kernel_fs_halt:
 ; Strings
 ; ----------------------------
 msg_boot           db "MINI_OS: booting kernel...", 10, 0
+msg_layout_fatal   db "MINI_OS: platform memory guard failed; system halted.", 10, 0
+msg_interrupt_fatal db "MINI_OS: interrupt initialization failed; system halted.", 10, 0
 msg_mount_ok       db "MINI_OS: filesystem detected.", 10, 0
 msg_format_ok      db "MINI_OS: format complete.", 10, 0
 msg_wrong_device   db "MINI_OS: boot device does not match primary ATA master; writes refused.", 10, 0
@@ -255,7 +342,7 @@ msg_edit_prompt    db "Editor mode: Enter=new line, ESC=save and exit.", 10, 0
 msg_edit_ok        db "Saved.", 10, 0
 msg_app_start      db "MINI_OS: launching app...", 10, 0
 msg_app_finished   db "MINI_OS: app exited cleanly.", 10, 0
-msg_run_too_large  db "Executable exceeds the 64 KiB application image region.", 10, 0
+msg_run_too_large  db "Executable exceeds the 512 KiB application image region.", 10, 0
 msg_run_bad_image  db "Executable metadata or FAT chain is invalid.", 10, 0
 msg_run_arg_long   db "Executable path or argument is too long.", 10, 0
 
@@ -283,3 +370,8 @@ str_readme_len     equ ($ - str_readme_content - 1)
 
 str_dot            db ".", 0
 str_dotdot         db "..", 0
+
+kernel_image_used_end:
+%if ($ - $$) > KERNEL_IMAGE_MAX_SIZE
+    %error "kernel image exceeds its reserved memory range"
+%endif

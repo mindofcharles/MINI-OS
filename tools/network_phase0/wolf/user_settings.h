@@ -1,0 +1,91 @@
+#ifndef MINI_OS_PHASE0_WOLF_SETTINGS_H
+#define MINI_OS_PHASE0_WOLF_SETTINGS_H
+
+#include <stddef.h>
+
+#define WOLFSSL_WOLFSSH
+#define WOLFCRYPT_ONLY
+#define SINGLE_THREADED
+#define NO_FILESYSTEM
+#define NO_STDIO_FILESYSTEM
+#define NO_WOLFSSL_DIR
+#define NO_WOLFSSL_MEMORY
+#define WOLFSSL_NO_MALLOC_CHECK
+#define WOLFSSL_NO_ASM
+#define WOLFSSL_NO_ATOMICS
+#define WOLFSSL_NO_FENCE
+#define NO_STDATOMIC_H
+#define NO_ERROR_STRINGS
+#define WOLFSSL_NO_ERROR_STRINGS
+#define WC_NO_ASYNC_THREADING
+#define NO_OLD_RNGNAME
+#define NO_OLD_TLS
+#define WOLFSSL_NO_TLS12
+#define WOLFSSL_ASN_TEMPLATE
+#define NO_ASN_TIME
+#define WOLFSSL_PUBLIC_MP
+
+#define HAVE_HASHDRBG
+#define CUSTOM_RAND_GENERATE_SEED mini_os_phase0_wolf_seed
+int mini_os_phase0_wolf_seed(unsigned char *output, unsigned int size);
+
+#define HAVE_ECC
+#define ECC_USER_CURVES
+#undef NO_ECC256
+#define ECC_MIN_KEY_SZ 256
+#define WOLFSSL_SP_MATH
+#define WOLFSSL_SP_SMALL
+#define WOLFSSL_HAVE_SP_ECC
+#define ECC_TIMING_RESISTANT
+#undef WOLFSSL_SP_NO_256
+#define NO_ECC384
+#define NO_ECC521
+
+#define NO_RSA
+#define NO_DH
+#define NO_DSA
+#define NO_ED25519
+#define NO_CURVE25519
+
+#define WOLFSSL_AES_COUNTER
+#define WOLFSSL_AES_DIRECT
+#define NO_AES_CBC
+#define NO_AES_192
+#define NO_AES_256
+#define WOLFSSL_AES_SMALL_TABLES
+#define WOLFSSL_AES_NO_UNROLL
+
+#define NO_SHA
+#define NO_SHA512
+#define USE_SLOW_SHA256
+
+#define NO_DES3
+#define NO_RC4
+#define NO_MD4
+#define NO_MD5
+#define NO_PSK
+#define NO_PKCS12
+#define NO_PWDBASED
+#define USE_WOLF_STRCASECMP
+#define NO_SESSION_CACHE
+
+#define NO_WOLFSSH_SERVER
+#define WOLFSSH_USER_IO
+#define WOLFSSH_NO_TIMESTAMP
+#define WOLFSSH_NO_STRINGS
+#define WOLFSSH_NO_RSA
+#define WOLFSSH_NO_SHA1
+#define WOLFSSH_NO_DH
+#define WOLFSSH_NO_ED25519
+#define WOLFSSH_NO_ECDH_SHA2_NISTP384
+#define WOLFSSH_NO_ECDH_SHA2_NISTP521
+#define WOLFSSH_NO_ECDSA_SHA2_NISTP384
+#define WOLFSSH_NO_ECDSA_SHA2_NISTP521
+#define WOLFSSH_NO_HMAC_SHA1
+#define WOLFSSH_NO_HMAC_SHA1_96
+#define WOLFSSH_NO_HMAC_SHA2_512
+#define WOLFSSH_NO_AES_CBC
+#define WOLFSSH_NO_AES_GCM
+#define WOLFSSH_NO_FPKI
+
+#endif

@@ -18,7 +18,13 @@
 #define SHT_NOBITS 8U
 #define SHT_REL 9U
 
+#define SHF_WRITE 1U
 #define SHF_ALLOC 2U
+#define SHF_EXECINSTR 4U
+#define SHF_MERGE 0x10U
+#define SHF_STRINGS 0x20U
+#define SUPPORTED_ALLOC_FLAGS \
+    (SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR | SHF_MERGE | SHF_STRINGS)
 #define SHN_UNDEF 0U
 #define SHN_ABS 0xFFF1U
 #define SHN_COMMON 0xFFF2U
@@ -34,10 +40,17 @@
 #define ELF32_R_SYM(value) ((value) >> 8)
 #define ELF32_R_TYPE(value) ((value) & 0xFFU)
 
-#define MAX_SYMBOLS 1024U
-#define MAX_SECTIONS 4096U
 #define MAX_INPUT_SIZE (64U * 1024U * 1024U)
-#define MAX_OUTPUT_SIZE (512U * 1024U)
+#define DEFAULT_MAX_OUTPUT_SIZE (512U * 1024U)
+#define DEFAULT_MAX_OBJECTS 256U
+#define DEFAULT_MAX_SYMBOLS 4096U
+#define DEFAULT_MAX_SECTIONS 4096U
+#define DEFAULT_MAX_RELOCATIONS 32768U
+#define HARD_MAX_OUTPUT_SIZE (64U * 1024U * 1024U)
+#define HARD_MAX_OBJECTS 4096U
+#define HARD_MAX_SYMBOLS 65536U
+#define HARD_MAX_SECTIONS 65535U
+#define HARD_MAX_RELOCATIONS (1024U * 1024U)
 #define UNPLACED_SECTION UINT32_MAX
 
 #pragma pack(push, 1)
@@ -87,14 +100,14 @@ typedef struct {
 #pragma pack(pop)
 
 typedef struct {
-    char name[128];
+    const char *name;
     uint32_t address;
     int defined;
     int weak;
 } GlobalSymbol;
 
 typedef struct {
-    char name[128];
+    const char *name;
     uint8_t *data;
     size_t size;
     Elf32_Ehdr *header;
@@ -102,12 +115,29 @@ typedef struct {
     const char *section_names;
     size_t section_names_size;
     uint32_t *output_offsets;
+    uint64_t relocation_count;
 } ObjectFile;
 
-static GlobalSymbol global_symbols[MAX_SYMBOLS];
+typedef struct {
+    uint32_t max_output_size;
+    uint32_t max_objects;
+    uint32_t max_symbols;
+    uint32_t max_sections;
+    uint32_t max_relocations;
+} CapacityLimits;
+
+static CapacityLimits limits = {
+    DEFAULT_MAX_OUTPUT_SIZE,
+    DEFAULT_MAX_OBJECTS,
+    DEFAULT_MAX_SYMBOLS,
+    DEFAULT_MAX_SECTIONS,
+    DEFAULT_MAX_RELOCATIONS
+};
+static GlobalSymbol *global_symbols;
 static size_t global_symbol_count;
-static uint8_t output_buffer[MAX_OUTPUT_SIZE];
+static uint8_t *output_buffer;
 static uint32_t output_size;
+static uint64_t total_relocations;
 
 static int range_valid(uint64_t offset, uint64_t size, uint64_t total) {
     return offset <= total && size <= total - offset;
@@ -115,6 +145,61 @@ static int range_valid(uint64_t offset, uint64_t size, uint64_t total) {
 
 static int power_of_two(uint32_t value) {
     return value != 0U && (value & (value - 1U)) == 0U;
+}
+
+static void print_usage(const char *program) {
+    fprintf(stderr,
+            "Usage: %s [capacity options] <output.bin> <base_addr> "
+            "<obj1.o> [obj2.o ...]\n"
+            "Capacity options:\n"
+            "  --max-output <bytes>\n"
+            "  --max-objects <count>\n"
+            "  --max-symbols <count>\n"
+            "  --max-sections <count-per-object>\n"
+            "  --max-relocations <count>\n",
+            program);
+}
+
+static int parse_capacity(const char *option, const char *text,
+                          uint32_t hard_maximum, uint32_t *value_out) {
+    char *end;
+    unsigned long long parsed;
+
+    errno = 0;
+    parsed = strtoull(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0' || parsed == 0U ||
+        parsed > hard_maximum) {
+        fprintf(stderr, "Error: invalid %s capacity '%s' (maximum %u).\n",
+                option, text, hard_maximum);
+        return -1;
+    }
+    *value_out = (uint32_t)parsed;
+    return 0;
+}
+
+static int set_capacity_option(const char *option, const char *value) {
+    if (strcmp(option, "--max-output") == 0) {
+        return parse_capacity(option, value, HARD_MAX_OUTPUT_SIZE,
+                              &limits.max_output_size);
+    }
+    if (strcmp(option, "--max-objects") == 0) {
+        return parse_capacity(option, value, HARD_MAX_OBJECTS,
+                              &limits.max_objects);
+    }
+    if (strcmp(option, "--max-symbols") == 0) {
+        return parse_capacity(option, value, HARD_MAX_SYMBOLS,
+                              &limits.max_symbols);
+    }
+    if (strcmp(option, "--max-sections") == 0) {
+        return parse_capacity(option, value, HARD_MAX_SECTIONS,
+                              &limits.max_sections);
+    }
+    if (strcmp(option, "--max-relocations") == 0) {
+        return parse_capacity(option, value, HARD_MAX_RELOCATIONS,
+                              &limits.max_relocations);
+    }
+    fprintf(stderr, "Error: unknown capacity option '%s'.\n", option);
+    return -1;
 }
 
 static int table_string(const char *table, size_t table_size, uint32_t offset,
@@ -129,17 +214,16 @@ static int table_string(const char *table, size_t table_size, uint32_t offset,
 static int add_global_symbol(const char *name, uint32_t address,
                              int defined, int weak) {
     size_t i;
-    size_t length;
 
     if (name == NULL || name[0] == '\0') return 0;
-    length = strlen(name);
-    if (length >= sizeof(global_symbols[0].name)) {
-        fprintf(stderr, "Error: symbol name is too long: '%s'.\n", name);
-        return -1;
-    }
     for (i = 0; i < global_symbol_count; i++) {
         if (strcmp(global_symbols[i].name, name) != 0) continue;
-        if (!defined) return 0;
+        if (!defined) {
+            if (!global_symbols[i].defined && !weak) {
+                global_symbols[i].weak = 0;
+            }
+            return 0;
+        }
         if (!global_symbols[i].defined) {
             global_symbols[i].address = address;
             global_symbols[i].defined = 1;
@@ -156,11 +240,12 @@ static int add_global_symbol(const char *name, uint32_t address,
         }
         return 0;
     }
-    if (global_symbol_count == MAX_SYMBOLS) {
-        fprintf(stderr, "Error: global symbol capacity (%u) exceeded.\n", MAX_SYMBOLS);
+    if (global_symbol_count >= limits.max_symbols) {
+        fprintf(stderr, "Error: global symbol capacity (%u) exceeded.\n",
+                limits.max_symbols);
         return -1;
     }
-    memcpy(global_symbols[global_symbol_count].name, name, length + 1U);
+    global_symbols[global_symbol_count].name = name;
     global_symbols[global_symbol_count].address = address;
     global_symbols[global_symbol_count].defined = defined;
     global_symbols[global_symbol_count].weak = weak;
@@ -174,6 +259,10 @@ static int find_global_symbol(const char *name, uint32_t *address_out) {
     for (i = 0; i < global_symbol_count; i++) {
         if (strcmp(global_symbols[i].name, name) == 0) {
             if (!global_symbols[i].defined) {
+                if (global_symbols[i].weak) {
+                    *address_out = 0U;
+                    return 0;
+                }
                 fprintf(stderr, "Error: symbol '%s' is undefined.\n", name);
                 return -1;
             }
@@ -198,11 +287,11 @@ static void free_objects(ObjectFile *objects, int count) {
 
 static int validate_section(ObjectFile *object, uint32_t index) {
     Elf32_Shdr *section;
-    const char *unused_name;
+    const char *section_name;
 
     section = &object->sections[index];
     if (table_string(object->section_names, object->section_names_size,
-                     section->sh_name, &unused_name) < 0) {
+                     section->sh_name, &section_name) < 0) {
         fprintf(stderr, "Error: %s section %u has an invalid name offset.\n",
                 object->name, index);
         return -1;
@@ -220,6 +309,47 @@ static int validate_section(ObjectFile *object, uint32_t index) {
     }
     if (section->sh_type == SHT_RELA) {
         fprintf(stderr, "Error: %s uses unsupported RELA relocations.\n", object->name);
+        return -1;
+    }
+    if ((section->sh_flags & SHF_ALLOC) != 0U &&
+        section->sh_type != SHT_PROGBITS && section->sh_type != SHT_NOBITS) {
+        fprintf(stderr,
+                "Error: %s section %u has unsupported allocatable type %u.\n",
+                object->name, index, section->sh_type);
+        return -1;
+    }
+    if ((section->sh_flags & SHF_ALLOC) != 0U &&
+        (section->sh_flags & ~SUPPORTED_ALLOC_FLAGS) != 0U) {
+        fprintf(stderr,
+                "Error: %s section %u has unsupported allocatable flags 0x%X.\n",
+                object->name, index,
+                section->sh_flags & ~SUPPORTED_ALLOC_FLAGS);
+        return -1;
+    }
+    if ((section->sh_flags & SHF_STRINGS) != 0U &&
+        (section->sh_flags & SHF_MERGE) == 0U) {
+        fprintf(stderr, "Error: %s section %u has SHF_STRINGS without SHF_MERGE.\n",
+                object->name, index);
+        return -1;
+    }
+    if ((section->sh_flags & SHF_MERGE) != 0U && section->sh_entsize == 0U) {
+        fprintf(stderr, "Error: %s section %u has SHF_MERGE without an entry size.\n",
+                object->name, index);
+        return -1;
+    }
+    if ((section->sh_flags & SHF_ALLOC) != 0U &&
+        (strcmp(section_name, ".init_array") == 0 ||
+         strncmp(section_name, ".init_array.", 12U) == 0 ||
+         strcmp(section_name, ".fini_array") == 0 ||
+         strncmp(section_name, ".fini_array.", 12U) == 0 ||
+         strcmp(section_name, ".preinit_array") == 0 ||
+         strncmp(section_name, ".preinit_array.", 15U) == 0 ||
+         strcmp(section_name, ".ctors") == 0 ||
+         strncmp(section_name, ".ctors.", 7U) == 0 ||
+         strcmp(section_name, ".dtors") == 0 ||
+         strncmp(section_name, ".dtors.", 7U) == 0)) {
+        fprintf(stderr, "Error: %s uses unsupported constructor/destructor section %s.\n",
+                object->name, section_name);
         return -1;
     }
     if (section->sh_type == SHT_SYMTAB &&
@@ -243,14 +373,7 @@ static int read_object(ObjectFile *object, const char *filename) {
     uint64_t section_table_size;
     Elf32_Shdr *name_section;
     uint32_t i;
-    size_t name_length;
-
-    name_length = strlen(filename);
-    if (name_length >= sizeof(object->name)) {
-        fprintf(stderr, "Error: object path is too long: '%s'.\n", filename);
-        return -1;
-    }
-    memcpy(object->name, filename, name_length + 1U);
+    object->name = filename;
     file = fopen(filename, "rb");
     if (file == NULL) {
         fprintf(stderr, "Error: cannot open '%s': %s\n", filename, strerror(errno));
@@ -288,7 +411,8 @@ static int read_object(ObjectFile *object, const char *filename) {
         object->header->e_version != EV_CURRENT ||
         object->header->e_ehsize != sizeof(Elf32_Ehdr) ||
         object->header->e_shentsize != sizeof(Elf32_Shdr) ||
-        object->header->e_shnum == 0U || object->header->e_shnum > MAX_SECTIONS ||
+        object->header->e_shnum == 0U ||
+        object->header->e_shnum > limits.max_sections ||
         object->header->e_shstrndx >= object->header->e_shnum) {
         fprintf(stderr, "Error: '%s' is not a supported 32-bit x86 relocatable ELF.\n",
                 filename);
@@ -310,9 +434,14 @@ static int read_object(ObjectFile *object, const char *filename) {
     object->section_names_size = name_section->sh_size;
     object->output_offsets = malloc((size_t)object->header->e_shnum * sizeof(uint32_t));
     if (object->output_offsets == NULL) return -1;
+    object->relocation_count = 0U;
     for (i = 0; i < object->header->e_shnum; i++) {
         object->output_offsets[i] = UNPLACED_SECTION;
         if (validate_section(object, i) < 0) return -1;
+        if (object->sections[i].sh_type == SHT_REL) {
+            object->relocation_count += object->sections[i].sh_size /
+                                        (uint32_t)sizeof(Elf32_Rel);
+        }
     }
     return 0;
 }
@@ -333,9 +462,11 @@ static int place_sections(ObjectFile *object, uint32_t base_address) {
         alignment = section->sh_addralign == 0U ? 1U : section->sh_addralign;
         aligned = ((uint64_t)output_size + alignment - 1U) & ~((uint64_t)alignment - 1U);
         end = aligned + section->sh_size;
-        if (aligned > UINT32_MAX || end > MAX_OUTPUT_SIZE ||
+        if (aligned > UINT32_MAX || end > limits.max_output_size ||
             (uint64_t)base_address + end > UINT32_MAX) {
-            fprintf(stderr, "Error: allocatable sections exceed the flat-output capacity.\n");
+            fprintf(stderr,
+                    "Error: allocatable sections exceed the flat-output capacity (%u).\n",
+                    limits.max_output_size);
             return -1;
         }
         object->output_offsets[i] = (uint32_t)aligned;
@@ -442,7 +573,7 @@ static int ensure_symbols_resolved(void) {
     size_t i;
 
     for (i = 0; i < global_symbol_count; i++) {
-        if (!global_symbols[i].defined) {
+        if (!global_symbols[i].defined && !global_symbols[i].weak) {
             fprintf(stderr, "Error: symbol '%s' remains undefined.\n",
                     global_symbols[i].name);
             return -1;
@@ -551,34 +682,72 @@ int main(int argc, char **argv) {
     unsigned long parsed_base;
     uint32_t base_address;
     ObjectFile *objects;
+    int argument_index;
+    int object_argument_index;
     int object_count;
     int i;
     int result;
 
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s <output.bin> <base_addr> <obj1.o> [obj2.o ...]\n",
-                argv[0]);
+    argument_index = 1;
+    while (argument_index < argc && argv[argument_index][0] == '-' &&
+           argv[argument_index][1] == '-') {
+        if (argument_index + 1 >= argc ||
+            set_capacity_option(argv[argument_index],
+                                argv[argument_index + 1]) < 0) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        argument_index += 2;
+    }
+    if (argc - argument_index < 3) {
+        print_usage(argv[0]);
         return 1;
     }
-    output_path = argv[1];
+    output_path = argv[argument_index++];
     errno = 0;
-    parsed_base = strtoul(argv[2], &end, 0);
-    if (errno != 0 || end == argv[2] || *end != '\0' || parsed_base > UINT32_MAX) {
-        fprintf(stderr, "Error: invalid base address '%s'.\n", argv[2]);
+    parsed_base = strtoul(argv[argument_index], &end, 0);
+    if (errno != 0 || end == argv[argument_index] || *end != '\0' ||
+        parsed_base > UINT32_MAX) {
+        fprintf(stderr, "Error: invalid base address '%s'.\n",
+                argv[argument_index]);
         return 1;
     }
+    argument_index++;
     base_address = (uint32_t)parsed_base;
-    object_count = argc - 3;
+    object_argument_index = argument_index;
+    object_count = argc - object_argument_index;
+    if ((uint32_t)object_count > limits.max_objects) {
+        fprintf(stderr, "Error: object capacity (%u) exceeded.\n",
+                limits.max_objects);
+        return 1;
+    }
+    global_symbols = calloc(limits.max_symbols, sizeof(*global_symbols));
+    output_buffer = calloc(limits.max_output_size, 1U);
     objects = calloc((size_t)object_count, sizeof(*objects));
-    if (objects == NULL) return 1;
-    memset(output_buffer, 0, sizeof(output_buffer));
+    if (global_symbols == NULL || output_buffer == NULL || objects == NULL) {
+        fprintf(stderr, "Error: cannot allocate linker working memory.\n");
+        free(global_symbols);
+        free(output_buffer);
+        free(objects);
+        return 1;
+    }
     output_size = 0U;
     global_symbol_count = 0U;
+    total_relocations = 0U;
 
     result = 0;
     for (i = 0; i < object_count && result == 0; i++) {
-        if (read_object(&objects[i], argv[i + 3]) < 0 ||
-            place_sections(&objects[i], base_address) < 0) result = -1;
+        if (read_object(&objects[i], argv[object_argument_index + i]) < 0) {
+            result = -1;
+        } else if (objects[i].relocation_count >
+                   (uint64_t)limits.max_relocations - total_relocations) {
+            fprintf(stderr, "Error: relocation capacity (%u) exceeded.\n",
+                    limits.max_relocations);
+            result = -1;
+        } else {
+            total_relocations += objects[i].relocation_count;
+            if (place_sections(&objects[i], base_address) < 0) result = -1;
+        }
     }
     for (i = 0; i < object_count && result == 0; i++) {
         if (collect_symbols(&objects[i], base_address) < 0) result = -1;
@@ -594,5 +763,7 @@ int main(int argc, char **argv) {
                output_path, output_size, base_address);
     }
     free_objects(objects, object_count);
+    free(output_buffer);
+    free(global_symbols);
     return result == 0 ? 0 : 1;
 }

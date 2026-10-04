@@ -3,38 +3,77 @@
 ; ----------------------------
 ; IDT & System Call Module
 ; ----------------------------
-IDT_BASE equ 0x26000
+%if IDT_SIZE != 256 * 8
+    %error "IDT_SIZE must describe all 256 eight-byte entries"
+%endif
 
 idt_descriptor:
-    dw (256 * 8) - 1
+    dw IDT_SIZE - 1
     dd IDT_BASE
 
 idt_init:
-    push eax
-    push ecx
-    push edi
+    pushad
 
-    ; Zero IDT memory at 0x26000 (2048 bytes)
+    ; Zero the complete shared-layout IDT region.
     mov edi, IDT_BASE
-    mov ecx, 256 * 8
+    mov ecx, IDT_SIZE
     call zero_buffer
 
-    ; Register int 0x80 (syscall) at entry 0x80 (128)
-    mov edi, IDT_BASE + (0x80 * 8)
-    mov eax, syscall_entry
+    ; Give every vector a present Ring-0 fatal gate before installing the
+    ; architected exception, remapped PIC, and syscall entries.
+    xor ecx, ecx
+.default_loop:
+    mov eax, unexpected_vector_stub
+    mov dl, 0x8E
+    call idt_set_gate
+    inc ecx
+    cmp ecx, 256
+    jb .default_loop
 
+    xor ecx, ecx
+.exception_loop:
+    mov eax, [exception_stub_table + ecx * 4]
+    mov dl, 0x8E
+    call idt_set_gate
+    inc ecx
+    cmp ecx, 32
+    jb .exception_loop
+
+    xor ebx, ebx
+.irq_loop:
+    mov ecx, ebx
+    add ecx, PIC_MASTER_VECTOR
+    mov eax, [irq_stub_table + ebx * 4]
+    mov dl, 0x8E
+    call idt_set_gate
+    inc ebx
+    cmp ebx, 16
+    jb .irq_loop
+
+    ; A trap gate leaves IF unchanged so IRQ0 can advance while a trusted
+    ; application is inside a filesystem or console system call.
+    mov ecx, 0x80
+    mov eax, syscall_entry
+    mov dl, 0xEF
+    call idt_set_gate
+
+    lidt [idt_descriptor]
+    popad
+    ret
+
+; IN: EAX=handler, ECX=vector, DL=type/attribute
+idt_set_gate:
+    push edi
+    mov edi, ecx
+    shl edi, 3
+    add edi, IDT_BASE
     mov [edi], ax            ; Offset 0..15
     mov word [edi + 2], 0x08  ; Segment Selector (Code Segment)
     mov byte [edi + 4], 0    ; Reserved
-    mov byte [edi + 5], 0xEE  ; Type_attr: Present, Ring 3, 32-bit Interrupt Gate
+    mov [edi + 5], dl
     shr eax, 16
     mov [edi + 6], ax        ; Offset 16..31
-
-    lidt [idt_descriptor]
-
     pop edi
-    pop ecx
-    pop eax
     ret
 
 ; ----------------------------
@@ -46,6 +85,10 @@ idt_init:
 ; Numbers, open flags, and negative errors come from transport/lib/syscall.def.
 syscall_entry:
     pushad
+    ; String and port-string operations in trusted syscall implementations
+    ; always run forward. IRET restores the caller's saved EFLAGS, including
+    ; its original DF, on ordinary returns.
+    cld
 
     cmp eax, SYS_NR_EXIT
     je near .sys_exit
@@ -80,6 +123,18 @@ syscall_entry:
     je near .sys_restore_screen
     cmp eax, SYS_NR_GET_CURSOR
     je near .sys_get_cursor
+    cmp eax, SYS_NR_CLOCK_MONOTONIC_MS
+    je near .sys_clock_monotonic_ms
+    cmp eax, SYS_NR_KBD_POLL_KEY
+    je near .sys_kbd_poll_key
+    cmp eax, SYS_NR_GET_RANDOM
+    je near .sys_get_random
+    cmp eax, SYS_NR_NET_GET_INFO
+    je near .sys_net_get_info
+    cmp eax, SYS_NR_NET_SEND_FRAME
+    je near .sys_net_send_frame
+    cmp eax, SYS_NR_NET_RECV_FRAME
+    je near .sys_net_recv_frame
 
     mov eax, SYS_ERR_INVALID
     jmp .syscall_return
@@ -105,7 +160,7 @@ syscall_entry:
 .clear_ft_done:
 
     ; Reset heap break pointer for next application run
-    mov dword [current_brk], 0x00050000
+    mov dword [current_brk], APP_HEAP_BASE
     ; Restore Shell stack and return to Shell
     mov esp, [saved_kernel_esp]
     jmp strict dword return_to_shell
@@ -114,9 +169,9 @@ syscall_entry:
     test ebx, ebx
     jz .sys_brk_done
 
-    cmp ebx, 0x00050000
+    cmp ebx, APP_HEAP_BASE
     jb .sys_brk_done
-    cmp ebx, 0x00080000
+    cmp ebx, APP_HEAP_END
     ja .sys_brk_done
 
     mov [current_brk], ebx
@@ -211,6 +266,55 @@ syscall_entry:
     test al, al
     jz .sys_getkey_loop
     movzx eax, al
+    jmp .syscall_return
+
+.sys_clock_monotonic_ms:
+    mov eax, [monotonic_ms]
+    jmp .syscall_return
+
+.sys_kbd_poll_key:
+    call kbd_poll_char
+    movzx eax, al
+    jmp .syscall_return
+
+.sys_get_random:
+    test ecx, ecx
+    jz .sys_get_random_zero
+    cmp ecx, RANDOM_REQUEST_MAX
+    ja .sys_get_random_range
+    test ebx, ebx
+    jz .sys_get_random_invalid
+    mov edi, ebx
+    call random_fill
+    jc .sys_get_random_unavailable
+    mov eax, ecx
+    jmp .syscall_return
+.sys_get_random_zero:
+    xor eax, eax
+    jmp .syscall_return
+.sys_get_random_range:
+    mov eax, SYS_ERR_RANGE
+    jmp .syscall_return
+.sys_get_random_invalid:
+    mov eax, SYS_ERR_INVALID
+    jmp .syscall_return
+.sys_get_random_unavailable:
+    mov eax, SYS_ERR_UNAVAILABLE
+    jmp .syscall_return
+
+.sys_net_get_info:
+    mov edi, ebx
+    call ne2k_get_info
+    jmp .syscall_return
+
+.sys_net_send_frame:
+    mov esi, ebx
+    call ne2k_send_frame
+    jmp .syscall_return
+
+.sys_net_recv_frame:
+    mov edi, ebx
+    call ne2k_recv_frame
     jmp .syscall_return
 
 .sys_write:
@@ -1025,7 +1129,7 @@ saved_cursor_col dd 0
 saved_vga_buffer times 4000 db 0
 
 tmp_read_cnt dd 0
-current_brk dd 0x00050000
+current_brk dd APP_HEAP_BASE
 tmp_fd_slot dd 0
 tmp_open_flags dd 0
 tmp_open_inode dd 0

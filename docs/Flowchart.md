@@ -10,16 +10,29 @@ This flow describes the transition from BIOS to the functional Shell.
 graph TD
     A[Power On / Reset] --> B[BIOS Loads Boot Sector LBA 0 to 0x7C00]
     B --> C[Bootloader: Set 16-bit Segments & Stack]
-    C --> D{INT 13h EDD Available?}
+    C --> MC{Firmware Reports Required<br/>Low and Extended RAM Spans?}
+    MC -- No --> MF[Print M and Halt]
+    MC -- Yes --> D{INT 13h EDD Available?}
     D -- Yes --> D1[Read One LBA Sector at a Time<br/>3 Attempts + Disk Reset]
     D1 -- EDD Failure --> D2[Restart Load with CHS Reads<br/>3 Attempts per Sector]
     D -- No --> D2
-    D1 -- Complete --> E[Bootloader: Define GDT - Null/Code/Data]
-    D2 -- Complete --> E
+    D1 -- Complete --> A20E[Enable Fast A20 Gate]
+    D2 -- Complete --> A20E
     D2 -- Failure --> DF[Print F and Halt]
+    A20E --> A20V{Addresses One MiB Apart<br/>Remain Distinct?}
+    A20V -- No --> A20F[Print A and Halt]
+    A20V -- Yes --> E[Bootloader: Define GDT - Null/Code/Data]
     E --> F[Bootloader: Set CR0.PE & Far Jump to 0x08:init_pm]
-    F --> G[Kernel: Initialize VGA 0xB8000 & Hardware Cursor]
-    G --> H[Kernel: Read Primary-Master LBA 0]
+    F --> KS[Kernel: Initialize Canary and Clear<br/>Complete Kernel Stack]
+    KS --> G[Kernel: Initialize VGA 0xB8000 & Hardware Cursor]
+    G --> LG{Clear Fixed Regions,<br/>Exercise Interrupt Stack,<br/>and Verify Canaries?}
+    LG -- No --> LF[Print Memory-Guard Error and Halt]
+    LG -- Yes --> IDT[Install Fatal Defaults,<br/>Exceptions 0..31, PIC IRQs,<br/>and int 0x80 Trap Gate]
+    IDT --> RI[Detect CPUID and RDRAND]
+    RI --> IRQ{Remap and Mask PIC,<br/>Run Dedicated-Stack IRQ/EOI Self-Test,<br/>Program PIT Channel 0?}
+    IRQ -- No --> IRQF[Print Interrupt Initialization Error and Halt]
+    IRQ -- Yes --> STI[Enable Maskable Interrupts]
+    STI --> H[Kernel: Read Primary-Master LBA 0]
     H --> HI{Boot Code, 48-bit Image ID,<br/>and Kernel Sample Match?}
     HI -- No --> HF[Print Wrong-Device Error and Halt<br/>No Disk Writes]
     HI -- Yes --> I{Superblock Valid and<br/>Mutation Marker Clear?}
@@ -45,20 +58,20 @@ flowchart TD
     WaitBSY1 -- Error / Timeout --> Fail
     WaitBSY1 -- Busy --> WaitBSY1
     WaitBSY1 -- Yes (Ready) --> Program[Program Task File Registers:<br/>0x1F2: Sector Count = 1<br/>0x1F3: LBA Low<br/>0x1F4: LBA Mid<br/>0x1F5: LBA High<br/>0x1F6: Drive/Head Select]
-    
+
     Program --> IssueCmd[Write Command to 0x1F7:<br/>Read: 0x20 / Write: 0x30]
-    
+
     IssueCmd --> WaitDRQ{ERR/DF Set?<br/>Timed Out?<br/>DRQ == 1?}
     WaitDRQ -- Error / Timeout --> Fail
     WaitDRQ -- Not Ready --> WaitDRQ
     WaitDRQ -- Yes (Ready) --> OpType{Operation Type?}
-    
+
     OpType -- Read (0x20) --> DataIn[REP INSW:<br/>Read 256 words from 0x1F0]
     DataIn --> WaitReadDone{ERR/DF Set?<br/>Timed Out?<br/>BSY == 0?}
     WaitReadDone -- Error / Timeout --> Fail
     WaitReadDone -- Busy --> WaitReadDone
     WaitReadDone -- Complete --> Finish([Return CF Clear])
-    
+
     OpType -- Write (0x30) --> DataOut[REP OUTSW:<br/>Write 256 words to 0x1F0]
     DataOut --> Flush[Issue Cache Flush:<br/>Write 0xE7 to 0x1F7]
     Flush --> WaitBSY2{ERR/DF Set?<br/>Timed Out?<br/>BSY == 0?}
