@@ -719,6 +719,8 @@ static int test_backend_extensions(void)
     return 1;
 }
 
+int test_tcp_codec(void);
+
 int main(void)
 {
     if (!test_public_gate() || !test_terminal_records() || !test_close_contract() ||
@@ -728,5 +730,5 @@ int main(void)
         !test_backend_extensions()) return 1;
     puts("E1 TCP foundation, owned ARP, service and backend tests: PASS");
     puts("Private lifecycle fixtures are not TCP wire interoperability evidence.");
-    return 0;
+    return test_tcp_codec() ? 0 : 1;
 }

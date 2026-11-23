@@ -8,7 +8,7 @@ Protocol parsing, packet construction, timers, and bounded state are modern C un
 
 The supported application protocol subset is Ethernet II, Ethernet/IPv4 ARP, static-address unfragmented IPv4, and ICMP Echo Request and Reply.
 
-The TCP interface and lifecycle foundation exist, but TCP packet encoding, handshaking, stream transfer, retransmission, and wire-level closing are not implemented.
+TCP has a private segment codec and sequence-number helpers alongside the public interface and lifecycle foundation. Calling `tcp_connect` still returns `TCP_ERR_UNSUPPORTED` for a valid new connection request.
 
 UDP, DHCP, DNS, SSH, IPv4 options, fragment reassembly, and ICMP error processing are not implemented.
 
@@ -32,13 +32,25 @@ The IPv4 transmitter uses a 20-byte header, a 1,500-byte MTU, TTL 64, and an ato
 
 The receiver validates declared IPv4 lengths and header checksums, rejects options and fragments, and dispatches only unicast packets addressed to the configured local address.
 
-ICMP performs its own message validation, while protocol 6 is accepted only through a private optional transport registration and is currently consumed as unsupported by the TCP foundation.
+ICMP performs its own message validation. Protocol 6 is accepted only through a private optional transport registration.
 
 An outbound Ping succeeds only for an Echo Reply with the expected addresses, identifier, sequence, payload length, and payload bytes.
 
 The stack responds to a valid unicast Echo Request only while a network application is polling; an idle MINI-OS shell is not continuously pingable.
 
 ARP is unauthenticated, and neither address-conflict defense nor protection against a syntactically valid forged ARP Request is provided.
+
+## TCP segment processing
+
+The private decoder validates the exact IPv4 payload, including the TCP data offset, option bounds, and mandatory IPv4 pseudo-header checksum. The returned payload view borrows bytes from the received frame.
+
+The decoder handles EOL, NOP, and MSS and skips well-formed options it does not support. It accepts a usable MSS on SYN and takes the smallest nonzero value if the option appears more than once. Header bytes after EOL must be zero.
+
+The private encoder writes a bounded TCP segment directly into the caller's IPv4 transmit space. It can checksum payload bytes already staged there and can emit a single MSS option on SYN.
+
+Sequence numbers use unsigned 32-bit modular arithmetic. The helpers expose the ambiguous half-space comparison and count each SYN and FIN as one sequence position in addition to any payload.
+
+When registered, the TCP callback records malformed segments in the malformed counter and valid segments in the unsupported counter. It then returns to the shared service loop.
 
 ## TCP foundation and contract
 
@@ -94,9 +106,9 @@ This is not an implemented target idle/wakeup path, and the deterministic backen
 
 `make test-network-host` runs deterministic backend, timing, cache, parser, and packet-construction tests without QEMU.
 
-It also checks the TCP foundation through private lifecycle fixtures, including retained errors, close-budget separation, stale handles, persistent ARP tasks, and the public unsupported-operation gates.
+It checks the TCP lifecycle foundation and uses independent wire vectors for the codec, including the IPv4 receive and transmit-buffer paths.
 
-`make test-network-sanitizers` instruments the complete currently implemented TCP foundation and shared packet/ARP service with AddressSanitizer and UndefinedBehaviorSanitizer, rather than checking only a packet parser.
+`make test-network-e2` runs the network host suite and its AddressSanitizer and UndefinedBehaviorSanitizer build, compiles the target TCP objects, and builds the strict-C90 guest contract probe.
 
 `make test-network-e1-qemu` runs the strict-C90 public-contract probe twice under each supported RDRAND-on and RDRAND-off CPU configuration, checks guarded return to the shell and image integrity, and does not claim a TCP handshake or interoperability result.
 

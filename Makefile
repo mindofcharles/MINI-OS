@@ -49,7 +49,7 @@ COMPILER_RT_OBJ := $(BUILD_DIR)/compiler_rt.o
 NET_BASE_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,raw.c platform.c time.c)
 NET_PHASE_D2_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,net.c address.c byteorder.c checksum.c)
 NET_IPV4_LIB_SRCS := $(NET_PHASE_D2_LIB_SRCS) $(addprefix $(LIB_DIR)/net/,ethernet.c arp.c ipv4.c icmp.c service.c poll.c)
-NET_TCP_LIB_SRCS := $(addprefix $(LIB_DIR)/net/tcp/,api.c connection.c timers.c)
+NET_TCP_LIB_SRCS := $(addprefix $(LIB_DIR)/net/tcp/,api.c connection.c timers.c codec.c sequence.c)
 NET_SHARED_CRYPTO_LIB_SRCS := $(LIB_DIR)/crypto/clear.c
 NET_ALL_LIB_SRCS := $(shell find $(LIB_DIR)/net $(LIB_DIR)/crypto -type f -name '*.c' 2>/dev/null | sort)
 NET_GROUPED_LIB_SRCS := $(NET_BASE_LIB_SRCS) $(NET_IPV4_LIB_SRCS) $(NET_TCP_LIB_SRCS) $(NET_SHARED_CRYPTO_LIB_SRCS)
@@ -127,7 +127,7 @@ NETWORK_PHASE_D_IPV4_TEST_SRCS := tests/network_phase_d/test_ipv4.c $(NETWORK_TE
 NETWORK_PHASE_E_PUBLIC_HEADER_OBJ := $(BUILD_DIR)/network-phase-e/public_header.o
 NETWORK_PHASE_E_TEST_BIN := $(BUILD_DIR)/network-phase-e/foundation_test
 NETWORK_PHASE_E_SANITIZER_BIN := $(BUILD_DIR)/network-phase-e/foundation_sanitizer_test
-NETWORK_PHASE_E_HOST_SRCS := tests/network_phase_e/test_foundation.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/time.c $(NET_IPV4_LIB_SRCS) $(NET_TCP_LIB_SRCS) $(NET_SHARED_CRYPTO_LIB_SRCS)
+NETWORK_PHASE_E_HOST_SRCS := tests/network_phase_e/test_foundation.c tests/network_phase_e/test_codec.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/time.c $(NET_IPV4_LIB_SRCS) $(NET_TCP_LIB_SRCS) $(NET_SHARED_CRYPTO_LIB_SRCS)
 
 TARGET_CFLAGS := -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -I$(LIB_DIR)
 LIB_CFLAGS := $(TARGET_CFLAGS) -std=gnu11
@@ -142,7 +142,7 @@ ELF2BIN_MAX_SECTIONS ?= 4096
 ELF2BIN_MAX_RELOCATIONS ?= 32768
 QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
 
-.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-d3 test-network-d4 test-network-d5 test-network-d6 test-network-e1 test-network-e1-qemu test-network-sanitizers test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe transport-inputs-force
+.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-d3 test-network-d4 test-network-d5 test-network-d6 test-network-e1 test-network-e1-qemu test-network-e2 test-network-sanitizers test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0 network-phase0-host-probe transport-inputs-force
 
 all: check-layout $(OS_IMG)
 
@@ -362,6 +362,8 @@ test-network-e1: test-network-host $(NET_TCP_LIB_OBJS) $(NET_SHARED_CRYPTO_LIB_O
 
 test-network-e1-qemu: $(OS_IMG) $(CHECK_TOOL)
 	$(PYTHON) tests/network_phase_e.py --image $(OS_IMG)
+
+test-network-e2: test-network-e1 test-network-sanitizers
 
 test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NETWORK_PHASE_D_ETHERNET_TEST_BIN) $(NETWORK_PHASE_D_ARP_TEST_BIN) $(NETWORK_PHASE_D_IPV4_TEST_BIN) $(NETWORK_PHASE_E_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_E_TEST_BIN) $(NET_IPV4_LIB_OBJS) $(APP_BUILD_DIR)/apps/ping.bin
 	$(NETWORK_PHASE_B_TEST_BIN)

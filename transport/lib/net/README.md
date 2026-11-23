@@ -6,7 +6,7 @@ Network-library implementations compile as modern C with fatal project warnings,
 
 - The base group contains `raw.c`, `platform.c`, and `time.c` and is selected by raw-frame and higher-level network consumers.
 - The IPv4 group contains initialization, address, byte-order, checksum, Ethernet, ARP, IPv4, ICMP, shared service, and polling code and is selected by `ping`, TCP consumers, and protocol probes.
-- The TCP group contains `tcp/api.c`, `tcp/connection.c`, and `tcp/timers.c` and is selected only by named TCP consumers and `test_tcp_contract`.
+- The TCP group contains `tcp/api.c`, `tcp/connection.c`, `tcp/timers.c`, `tcp/codec.c`, and `tcp/sequence.c` and is selected only by named TCP consumers and `test_tcp_contract`.
 - The shared crypto group currently contains only `../crypto/clear.c` and is selected with TCP, without importing SSH or a hash/HMAC implementation.
 
 The build rejects every source under the network and shared crypto directories that has no group, belongs to more than one group, or is named by a group but absent from the tree.
@@ -45,6 +45,14 @@ The complete TCP context owns two 4 KiB queues inside a 12 KiB static limit, and
 
 The target idle hook currently returns unavailable for positive waits, so fake-clock idle tests do not establish a production idle path.
 
-TCP codec, secure handshake, actual byte streams, retransmission, FIN/TIME_WAIT processing, and target idle/wakeup remain unimplemented.
+## TCP segments
 
-Deterministic lifecycle fixtures and the guarded strict-C90 guest probe validate this foundation, not TCP wire interoperability.
+`tcp/codec.h` defines the private segment view and encoding interface. The decoder checks the exact IPv4 payload and issues a borrowed view after validating the header, options, and checksum.
+
+The encoder supports the fixed TCP header and an optional SYN MSS. It can use payload bytes staged in the existing transmit frame.
+
+`checksum.c` accumulates the IPv4 pseudo-header and segment in wire order while carrying odd-byte position across spans. Its contiguous checksum interface remains available to IPv4 and ICMP.
+
+`tcp/sequence.h` exposes modular comparison and half-open range checks for 32-bit TCP sequence numbers.
+
+The registered TCP callback classifies segments and updates counters. The public contract probe continues to expect `TCP_ERR_UNSUPPORTED` from a new active-open request.

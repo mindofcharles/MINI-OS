@@ -16,6 +16,7 @@ make test-network-d6
 make test-network-e1
 make test-network-sanitizers
 make test-network-e1-qemu
+make test-network-e2
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -27,9 +28,9 @@ make test
 
 `make` first checks the platform memory layout and then runs the read-only image checker after host injection.
 
-`make test` runs the host network, TCP-foundation sanitizer, raw ABI, build-policy, deterministic NE2000, ARP/ICMP protocol, TCP-contract guest, and general QEMU end-to-end regressions.
+`make test` runs the host network, TCP lifecycle and codec sanitizer, raw ABI, build-policy, deterministic NE2000, ARP/ICMP protocol, TCP-contract guest, and general QEMU end-to-end regressions.
 
-`make test-network-host` compiles the application-level network and TCP headers plus `ping.c` under strict C90 and runs deterministic clock, random, wrap, cancellation, raw-device, transmit-capture, receive-queue, byte-order, checksum, address, configuration, initialization, Ethernet, ARP, IPv4, ICMP Echo, polling, and TCP-foundation regressions without linking the production syscall adapter into host tests.
+`make test-network-host` compiles the application-level network and TCP headers plus `ping.c` under strict C90 and runs deterministic platform, network protocol, TCP lifecycle, and TCP codec regressions using the host test adapters.
 
 `make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the Phase D regression against the shared deterministic backend.
 
@@ -53,7 +54,9 @@ It target-compiles the network library as modern C with fatal warnings and build
 
 `make test-network-e1` runs the host suite and target-compiles the modern-C TCP and shared-clear groups plus the strict-C90 guest contract probe.
 
-`make test-network-sanitizers` builds and runs the complete implemented TCP-foundation host closure with AddressSanitizer and UndefinedBehaviorSanitizer, including the shared Ethernet, ARP, IPv4, and polling service rather than only a codec.
+`make test-network-e2` runs the host suite and target compilation from `test-network-e1` together with the instrumented host suite.
+
+`make test-network-sanitizers` builds and runs the same TCP lifecycle, codec, and sequence tests with AddressSanitizer and UndefinedBehaviorSanitizer. The instrumented binary includes the shared Ethernet, ARP, IPv4, and polling service.
 
 It fails when the sanitizer build or runtime is unavailable instead of silently skipping coverage.
 
@@ -247,4 +250,12 @@ The isolated backend tests schedule out-of-order and wrapping-time receive event
 
 The guest probe validates the real strict-C90 interface, unsupported-connect behavior, unchanged output on rejection, zero-capacity receive errors, target idle unavailability, final disable, and fresh state on the next application run.
 
-Neither suite claims TCP packet validation, secure active open, byte-stream transfer, FIN/TIME_WAIT processing, target idle/wakeup, or wire interoperability, which are not implemented by the foundation.
+## TCP Codec and Sequence Tests
+
+The codec tests compare encoder output and decoder results separately against fixed wire vectors. They cover odd payloads, a valid zero-valued checksum, independent source and destination address checks, and checksums split across odd-byte boundaries.
+
+Truncation tests back each input length with its own allocation so AddressSanitizer checks the actual end of the buffer. Additional cases cover invalid data offsets, option lengths, EOL padding, unknown options, MSS handling, output guards, and the exact IPv4 payload limit.
+
+Sequence cases cover equality, wraparound, half-open range boundaries, the ambiguous half-space distance, and the sequence positions consumed by SYN and FIN.
+
+The deterministic backend feeds a padded IPv4 frame through the registered TCP callback and checks the resulting classification and connection state. It also captures a complete frame generated in the existing transmit buffer for byte comparison, including Ethernet padding.

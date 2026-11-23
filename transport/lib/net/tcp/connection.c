@@ -1,4 +1,5 @@
 #include "internal.h"
+#include "codec.h"
 
 #include "../address.h"
 #include "../arp.h"
@@ -205,11 +206,21 @@ int tcp_connection_input(void *owner,
                           const struct net_ethernet_view *ethernet,
                           const struct net_ipv4_view *packet)
 {
+    struct tcp_segment_view segment;
+    int classification;
+
     (void)owner;
     (void)ethernet;
-    (void)packet;
-    /* No TCP codec/engine yet: consume as unsupported, never mutate a TCB. */
-    ++net_global_context.counters.unsupported_frames;
+    classification = tcp_segment_decode(packet, &segment);
+    if (classification < 0) {
+        return classification;
+    }
+    if (classification == TCP_SEGMENT_MALFORMED) {
+        ++net_global_context.counters.malformed_frames;
+    } else {
+        /* Connection processing begins with active open. */
+        ++net_global_context.counters.unsupported_frames;
+    }
     return 0;
 }
 
