@@ -30,7 +30,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - Complete IDT with fatal exception diagnostics, remapped 8259 IRQs, a dedicated interrupt stack, and PIT IRQ0 monotonic timekeeping
 - Polling NE2000 raw Ethernet transport with bounded Remote DMA, transmit, receive-ring, overrun, reset, and unavailable-device paths
 - Application-linked modern-C Ethernet II, ARP, static IPv4, and ICMP Echo with a strict-C90 `ping` application
-- Application-linked IPv4 TCP active open with secure ISN generation and one resumable handshake
+- Application-linked IPv4 TCP with one resumable active open, secure ISN generation, and bounded bidirectional byte streams
 - `int 0x80` System Call Engine for console, heap, file, cursor, monotonic-clock, nonblocking-key, RDRAND-backed secure-random, and raw-frame services
 - FAT-chain executable loader (`run <file>`) for flat binaries up to 512 KiB at `0x00100000`
 - Modern-C runtime implementation with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**

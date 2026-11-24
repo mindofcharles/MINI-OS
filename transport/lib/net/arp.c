@@ -311,6 +311,14 @@ int net_arp_handle(struct net_context *context,
         return 0;
     }
     if (classification == NET_ARP_REQUEST) {
+        int reply = send_packet(context, &packet.sender_mac, NET_ARP_REPLY,
+                                &context->config.address, &packet.sender_mac,
+                                &packet.sender_ip);
+
+        if (reply == NET_ETHERNET_TX_DEFERRED) {
+            /* The shared service will redispatch this request. */
+            return reply;
+        }
         if (!ipv4_zero(&packet.sender_ip) &&
             net_ipv4_is_on_link_peer(&context->config,
                                      &packet.sender_ip)) {
@@ -320,10 +328,7 @@ int net_arp_handle(struct net_context *context,
                 return result;
             }
         }
-        result = send_packet(context, &packet.sender_mac, NET_ARP_REPLY,
-                             &context->config.address, &packet.sender_mac,
-                             &packet.sender_ip);
-        return result == 0 ? 1 : result;
+        return reply == 0 ? 1 : reply;
     }
     if (!context->pending_arp.active ||
         net_arp_task_result(context, context->pending_arp.owner, 0) !=
@@ -379,12 +384,15 @@ int net_arp_timer(struct net_context *context, net_u32 now)
             context->config.arp_retry_interval_ms) {
         return 0;
     }
+    result = send_packet(context, &broadcast, NET_ARP_REQUEST,
+                         &context->config.address, &zero,
+                         &context->pending_arp.address);
+    if (result == NET_ETHERNET_TX_DEFERRED) {
+        return 0;
+    }
     context->arp_last_request_ms = now;
     context->arp_request_seen = 1;
     context->pending_arp.last_request_ms = now;
     ++context->pending_arp.attempts;
-    result = send_packet(context, &broadcast, NET_ARP_REQUEST,
-                         &context->config.address, &zero,
-                         &context->pending_arp.address);
     return result == 0 ? 1 : result;
 }

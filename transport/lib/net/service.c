@@ -2,7 +2,6 @@
 
 #include "arp.h"
 #include "ipv4.h"
-#include "net_platform.h"
 
 #include <string.h>
 
@@ -73,7 +72,7 @@ int net_service_fail(struct net_context *context, int result)
     return result;
 }
 
-/* Exactly one receive and bounded timer/dispatch work under one service guard. */
+/* At most one raw receive and bounded timer/dispatch work under one guard. */
 int net_service_once(struct net_context *context, net_u32 started_ms,
                        unsigned int wait_ms)
 {
@@ -105,12 +104,19 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
         }
         actions += result != 0;
     }
+    if (net_service_io_expired(context)) {
+        return actions;
+    }
     result = net_arp_timer(context, now);
     if (result < 0) {
         return net_service_fail(context, result);
     }
     actions += result;
-    received = net_recv_frame(context->rx_frame, sizeof(context->rx_frame));
+    if (net_service_io_expired(context)) {
+        return actions;
+    }
+    received = context->rx_deferred_length != 0U ? (int)context->rx_deferred_length :
+               net_recv_frame(context->rx_frame, sizeof(context->rx_frame));
     if (received == SYS_ERR_UNAVAILABLE) {
         return net_service_fail(context, NET_ERR_UNAVAILABLE);
     }
@@ -133,13 +139,19 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
         return net_service_fail(context, classification);
     }
     if (context->transport.owner == 0 && net_cancel_requested()) {
+        context->rx_deferred_length = 0U;
         return net_service_fail(context, NET_ERR_CANCELLED);
     }
     /* An owned transport applies its own protocol deadline to a received frame. */
     if (wait_ms != 0U && context->transport.arp_owner == NET_ARP_OWNER_SYNC &&
         net_timeout_expired(started_ms, net_clock_now_ms(), wait_ms)) {
+        if (context->rx_deferred_length != 0U) {
+            /* Count a saved request only once, when it is dispatched. */
+            --context->counters.received_frames;
+        }
         return actions;
     }
+    context->rx_deferred_length = 0U;
     if (classification == NET_ETHERNET_ARP) {
         result = net_arp_handle(context, &view);
     } else if (classification == NET_ETHERNET_IPV4) {
@@ -147,6 +159,28 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
     } else {
         result = 0;
     }
+    if (result == NET_ETHERNET_TX_DEFERRED) {
+        /* ARP and ICMP requests can be redispatched without side effects.
+         * TCP copied its data and retains pending output in its own state. */
+        context->rx_deferred_length = (unsigned int)received;
+        --context->counters.received_frames;
+        return actions;
+    }
     return result < 0 ? net_service_fail(context, result) :
            actions + (result != 0);
+}
+
+int net_service_io_once(struct net_context *context, net_u32 started_ms,
+                          unsigned int wait_ms)
+{
+    int result;
+
+    if (context == 0 || !net_timeout_valid(wait_ms)) {
+        return NET_ERR_INVALID;
+    }
+    context->io_started_ms = started_ms;
+    context->io_wait_ms = wait_ms;
+    result = net_service_once(context, started_ms, wait_ms);
+    context->io_wait_ms = 0U;
+    return result;
 }

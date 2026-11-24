@@ -119,10 +119,12 @@ int net_icmp_handle(struct net_context *context,
         return classification;
     }
     if (classification == NET_ICMP_ECHO_REQUEST) {
-        ++context->counters.echo_requests;
         result = send_echo(context, &packet->source,
                            &ethernet->source, 0U, echo.identifier,
                            echo.sequence, echo.payload, echo.payload_length);
+        if (result != NET_ETHERNET_TX_DEFERRED) {
+            ++context->counters.echo_requests;
+        }
         return result == 0 ? 1 : result;
     }
     ++context->counters.echo_replies;

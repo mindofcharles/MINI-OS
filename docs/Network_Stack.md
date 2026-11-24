@@ -6,9 +6,9 @@ The network stack is linked into an application and uses the kernel's polling NE
 
 Protocol parsing, packet construction, timers, and bounded state are modern C under `transport/lib/net/`, while applications, guest probes, and the application-facing `net.h` and `tcp.h` interfaces remain strict-C90 compatible.
 
-The supported protocol subset is Ethernet II, Ethernet/IPv4 ARP, static-address unfragmented IPv4, ICMP Echo, and active opening of one IPv4 TCP connection.
+The supported protocol subset is Ethernet II, Ethernet/IPv4 ARP, static-address unfragmented IPv4, ICMP Echo, and one actively opened IPv4 TCP connection with bounded bidirectional byte streams.
 
-TCP stream transfer, passive open, and wire-level connection shutdown are not implemented.
+TCP data retransmission, congestion control, zero-window probing by the sender, passive open, and wire-level shutdown are not implemented. The stream implementation does not yet recover from dropped data or window updates.
 
 UDP, DHCP, DNS, SSH, IPv4 options, fragment reassembly, and ICMP error processing are not implemented.
 
@@ -58,9 +58,9 @@ Include `net/tcp.h`, initialize the network with `net_init`, and set a new `tcp_
 
 `tcp_connect` resolves the configured next hop, sends a SYN with a 536-byte MSS, and returns zero after accepting the peer's SYN-ACK and successfully sending the final ACK. The final transmission is the commit point. Its last deadline check happens before sending, so a tick during a successful synchronous send cannot retroactively fail the handshake.
 
-TCP control packets use the configured next hop. If the neighbor entry expires after SYN, TCP retains the accepted SYN-ACK's sequence, MSS, and window while it resolves that next hop. It remains connecting until the ACK succeeds. A repeated SYN-ACK requests the same ACK after establishment. A reset in response to an unacceptable SYN-SENT ACK is sent only if the next hop is already resolved.
+TCP packets use the configured next hop. If the neighbor entry expires after SYN, TCP retains the accepted SYN-ACK's sequence, MSS, and window while it resolves that next hop. It remains connecting until the ACK succeeds. A repeated SYN-ACK requests an ACK with the current stream sequence, cumulative acknowledgment, and receive window, without restarting the handshake. A reset in response to an unacceptable SYN-SENT ACK is sent only if the next hop is already resolved.
 
-The advertised receive window remains zero. The stack answers a peer's window probe with the unchanged cumulative ACK and window, without accepting data or FIN. Positive-length sends and receives on an established connection return `TCP_ERR_UNSUPPORTED`.
+The initial SYN advertises a zero receive window. The final ACK opens the empty 4 KiB receive queue to the peer and hands the connection to the stream engine.
 
 The SYN timer starts at one second and doubles after each retransmission. Each attempt allows one initial SYN and at most five retransmissions with the same port and sequence number.
 
@@ -80,6 +80,24 @@ On an established connection, `tcp_shutdown_write` and `tcp_close` return `TCP_E
 
 Only the next application run recreates this storage, and no TCP work can continue after an application returns to the shell.
 
+## TCP byte streams
+
+`tcp_send` copies a prefix of the caller's buffer into the 4 KiB transmit queue. A positive return counts bytes accepted by the library, not bytes transmitted or acknowledged. The queue keeps unsent bytes separate from sent but unacknowledged bytes and frees a prefix only when a valid cumulative ACK covers it. `tcp_status` reports free local transmit space, not the peer's advertised window.
+
+`tcp_recv` copies contiguous stream bytes from the 4 KiB receive queue. Reads and writes may be partial and do not preserve segment boundaries. With no immediate progress, a zero-wait call gives both directions one service opportunity before returning `TCP_ERR_WOULD_BLOCK`. A positive call budget can expire with `NET_ERR_TIMEOUT` without terminating the connection. In either case, a later call or `net_poll` can continue processing the stream.
+
+Positive stream waits check the deadline before starting an application copy or another raw receive or transmit. An already started driver operation may finish later. A received segment can still update the protocol queues, but the expired call cannot claim newly available bytes or space. Unsent acknowledgments remain pending, and a prefix copied before expiry is still reported.
+
+The sender limits data by the peer's current window and the smaller of the peer's usable MSS and 536 bytes, with at most one effective MSS outstanding for now. A future ACK cannot release unsent data. A window report with an older sequence number, or an older acknowledgment at the same sequence number, cannot replace the current window.
+
+An otherwise valid window update may reuse both sequence and acknowledgment values from the last report because the peer can free buffer space without advancing either value. Those two fields alone cannot order such reports. See [RFC 9293 section 3.8.6](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6).
+
+The receiver drops out-of-order data and acknowledges the next byte it needs. It trims already received prefixes and data beyond its advertised right edge. A full queue advertises zero and answers a peer probe without consuming a byte. Reading data schedules a window update, which can be sent on its own or carried by outgoing data. Space is not granted to the peer until the corresponding window is transmitted.
+
+An established connection accepts a reset at its next expected receive sequence. A reset elsewhere in the advertised window requests an empty challenge ACK, at most once per 500 ms per connection. Other resets are ignored, including non-exact resets when the window is zero. A challenge does not carry queued application data. See [RFC 9293 section 3.10.7.4](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.10.7.4) for the reset checks.
+
+The stream does not consume FIN or report wire-level EOF yet. An accepted reset or other terminal failure remains visible through the handle, including when an I/O call already returned a positive byte count.
+
 ## Internal ownership and resource bounds
 
 The shared service step provides bounded receive, timer, cancellation, and packet dispatch under one reentrancy guard without an unconditional TCP reference in the IPv4 object group.
@@ -90,7 +108,9 @@ Synchronous resolution and Ping also finish their task when startup crosses the 
 
 Stale generations cannot start or finish another connection's task, and cache expiry and re-resolution use the existing bounded ARP policy rather than a permanently cached neighbor MAC.
 
-A post-connect ACK can also wait for a fresh next hop. There is one pending ACK per connection, and repeated requests for it do not restart its 120,000 ms neighbor budget. ARP attempt exhaustion can end it sooner. A failed refresh is retained as `TCP_ERR_NEIGHBOR_TIMEOUT`.
+After connection, sendable data and pending ACKs can share a fresh next-hop lookup while receive and cancellation continue. Repeated requests do not restart an unresolved lookup's 120,000 ms budget. ARP attempt exhaustion can end it sooner. A resolved lookup is complete even if the call deadline defers the transmit. Resolution timeout for ordinary output is retained as `TCP_ERR_NEIGHBOR_TIMEOUT`. If only a reset challenge needs the result, resolution timeout abandons the challenge without terminating the connection.
+
+If a stream wait expires before sending an ARP or ICMP reply, the shared service can defer that request using the existing receive frame. It sends and counts the reply work on a later service opportunity without allocating another frame.
 
 The shared receive service treats successful NE2000 recovery from a receive overrun or receive DMA timeout as a dropped frame. Other receive errors keep their existing failure mapping. A transmit error still does not confirm delivery or complete a handshake.
 
@@ -112,14 +132,14 @@ This is not an implemented target idle/wakeup path, and the deterministic backen
 
 It checks the TCP lifecycle foundation and uses independent wire vectors for the codec, including the IPv4 receive and transmit-buffer paths.
 
-`make test-network-e3` runs the network host suite and its AddressSanitizer and UndefinedBehaviorSanitizer build, compiles the target TCP objects, and builds the strict-C90 guest probe. It covers HMAC known answers and allocation faults, entropy failures, exact SYN and ACK packets, retries, neighbor refresh, and terminal causes.
+`make test-network-tcp` runs the TCP host suite normally and with AddressSanitizer and UndefinedBehaviorSanitizer, compiles the target TCP objects, and builds the strict-C90 guest probe. It covers the handshake, both rings wrapping, partial ACKs, large binary streams, receive-window closure and reopening, neighbor refresh, and terminal causes.
 
-`make test-network-e3-qemu` compares handshake frames against a controlled Ethernet peer on QEMU's NE2000 device. It checks retransmission, lost final ACK recovery, different ingress and egress MAC addresses, zero-window probe acknowledgments, refusal, and zero transmitted frames when RDRAND is unavailable. It also checks an i386 HMAC known-answer vector, repeated app runs, guarded shell return, and image integrity.
+`make test-network-tcp-qemu` verifies handshake retransmission, lost final ACK recovery, refusal, and the no-entropy path through QEMU's NE2000 device. A controlled Ethernet peer and the guest also check exact streams of 7,351 and 7,129 bytes in opposite directions, using different ingress and egress MAC addresses. The test checks an i386 HMAC known-answer vector, repeated application runs, guarded shell return, and image integrity.
 
 `make test-network-d6` boots temporary debug images and tests exact ARP and ICMP wire packets through QEMU's NE2000 model against a controlled Ethernet peer, including cache reuse and expiry, malformed-packet rejection, inbound replies, bounded timeout, and keyboard cancellation.
 
 The same target separately requires four successful Ping replies from QEMU user networking's local router `10.0.2.2`, then checks image integrity and continued shell operation.
 
-`make test-network-qemu` includes the raw-frame driver, ARP/ICMP, TCP active-open, and general end-to-end regressions. `make test` additionally includes the host, sanitizer, ABI, and build regressions.
+`make test-network-qemu` includes the raw-frame driver, ARP/ICMP, TCP handshake and stream, and general end-to-end regressions. `make test` additionally includes the host, sanitizer, ABI, and build regressions.
 
 Successful runs leave no packet capture or debug log behind, while failures retain them under `build/test-artifacts/`.

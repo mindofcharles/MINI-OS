@@ -720,6 +720,7 @@ static int test_backend_extensions(void)
 
 int test_tcp_codec(void);
 int test_tcp_active_open(void);
+int test_tcp_stream(void);
 
 int main(void)
 {
@@ -730,5 +731,5 @@ int main(void)
         !test_backend_extensions()) return 1;
     puts("E1 TCP foundation, owned ARP, service and backend tests: PASS");
     puts("Private lifecycle fixtures are not TCP wire interoperability evidence.");
-    return test_tcp_codec() && test_tcp_active_open() ? 0 : 1;
+    return test_tcp_codec() && test_tcp_active_open() && test_tcp_stream() ? 0 : 1;
 }

@@ -121,10 +121,7 @@ int tcp_connection_fail(int result)
         result == TCP_ERR_WOULD_BLOCK || result == TCP_ERR_UNREAD) {
         return NET_ERR_INVALID;
     }
-    if (net_global_context.pending_arp.active &&
-        net_global_context.pending_arp.owner == handle) {
-        (void)net_arp_task_finish(&net_global_context, handle);
-    }
+    tcp_finish_neighbor(connection);
     net_global_context.transport.arp_owner = NET_ARP_OWNER_SYNC;
     crypto_clear(connection, (unsigned int)sizeof(*connection));
     connection->handle = handle;
@@ -157,10 +154,7 @@ int tcp_connection_complete(void)
         connection->rx_length != 0U || connection->tx_length != 0U) {
         return TCP_ERR_UNREAD;
     }
-    if (net_global_context.pending_arp.active &&
-        net_global_context.pending_arp.owner == handle) {
-        (void)net_arp_task_finish(&net_global_context, handle);
-    }
+    tcp_finish_neighbor(connection);
     net_global_context.transport.arp_owner = NET_ARP_OWNER_SYNC;
     crypto_clear(connection, (unsigned int)sizeof(*connection));
     connection->handle = handle;
@@ -193,7 +187,7 @@ int tcp_connection_begin_close(net_u32 now_ms)
     return 0;
 }
 
-/* Prefix ordering helper shared by the future stream engine and contract tests. */
+/* A copy already reported as progress takes precedence over a terminal error. */
 int tcp_connection_progress_result(unsigned int accepted, int result)
 {
     if (tcp_global_context.connection.handle == TCP_INVALID_HANDLE) {
@@ -233,7 +227,22 @@ int tcp_connection_input(void *owner,
         ++net_global_context.counters.unsupported_frames;
         return 0;
     }
-    return tcp_open_input(connection, packet, &segment);
+    if (connection->open.syn_transmissions == 0U ||
+        segment.source_port != connection->endpoint.port ||
+        segment.destination_port != connection->open.local_port ||
+        memcmp(packet->source.octets, connection->endpoint.address.octets,
+               sizeof(packet->source.octets)) != 0 ||
+        memcmp(packet->destination.octets, net_global_context.config.address.octets,
+               sizeof(packet->destination.octets)) != 0) {
+        return 0;
+    }
+    if (connection->state == TCP_STATE_CONNECTING) {
+        return tcp_open_input(connection, &segment);
+    }
+    if (connection->state == TCP_STATE_ESTABLISHED) {
+        return tcp_stream_input(connection, &segment);
+    }
+    return 0;
 }
 
 void tcp_connection_service_failure(void *owner, int result)

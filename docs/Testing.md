@@ -14,11 +14,9 @@ make test-network-d3
 make test-network-d4
 make test-network-d5
 make test-network-d6
-make test-network-e1
+make test-network-tcp
 make test-network-sanitizers
-make test-network-e2
-make test-network-e3
-make test-network-e3-qemu
+make test-network-tcp-qemu
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -32,9 +30,9 @@ make test
 
 Run `make deps` once before the full test suite, or point `MBEDTLS_SOURCE` at a Mbed TLS 3.6.7 source tree. The tests do not download dependencies.
 
-`make test` runs the host network and TCP sanitizer suites, the raw ABI and build-policy tests, and QEMU checks for NE2000, ARP/ICMP, TCP active open, and general system behavior.
+`make test` runs the host network and TCP sanitizer suites, the raw ABI and build-policy tests, and QEMU checks for NE2000, ARP/ICMP, TCP active open and streams, and general system behavior.
 
-`make test-network-host` compiles the application-level network and TCP headers plus `ping.c` under strict C90 and runs deterministic platform, network protocol, TCP lifecycle, codec, and active-open regressions using the host test adapters.
+`make test-network-host` compiles the application-level network and TCP headers plus `ping.c` under strict C90 and runs deterministic platform, network protocol, TCP lifecycle, codec, active-open, and byte-stream regressions using the host test adapters.
 
 `make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the Phase D regression against the shared deterministic backend.
 
@@ -56,21 +54,21 @@ It target-compiles the network library as modern C with fatal warnings and build
 
 `make test-network-d6` checks exact ARP and ICMP wire packets through the production NE2000 driver, malformed and unrelated reply rejection, cache reuse and expiry, active inbound replies, bounded ARP and Echo timeouts, keyboard cancellation, and four successful Ping replies from the QEMU user-network router.
 
-`make test-network-e1` runs the host suite and target-compiles the modern-C TCP and shared crypto groups plus the strict-C90 guest contract probe.
+`make test-network-tcp` runs the ordinary and instrumented TCP host suites, compiles the strict-C90 public-header check and guest probe, and builds the modern-C target TCP and crypto objects. It does not run QEMU.
 
-`make test-network-e3` runs the host and instrumented suites and compiles the target objects and probe. The earlier `test-network-e2` entry point runs the same suite.
+The general host target and the TCP target share the ordinary TCP suite, so requesting both in one `make` invocation runs that suite once.
 
-`make test-network-sanitizers` runs the TCP lifecycle, codec, sequence, and secure active-open tests with AddressSanitizer and UndefinedBehaviorSanitizer. The instrumented binary includes the pinned HMAC implementation and the shared Ethernet, ARP, IPv4, and polling service.
+`make test-network-sanitizers` runs the TCP lifecycle, codec, sequence, secure active-open, and stream tests with AddressSanitizer and UndefinedBehaviorSanitizer. The instrumented binary includes the pinned HMAC implementation and the shared Ethernet, ARP, IPv4, and polling service.
 
 It fails when the sanitizer build or runtime is unavailable instead of silently skipping coverage.
 
-`make test-network-e3-qemu` checks the actual handshake through the production driver, including lost SYN and final ACK recovery, remote refusal, and the no-entropy path. It requires a guarded shell return and checks the temporary images. `make test-network-e1-qemu` remains an alias.
+`make test-network-tcp-qemu` uses the production driver to test the handshake and compare large byte streams in both directions. It requires a guarded shell return and checks the temporary images.
 
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 
 `make test-network-driver` runs a deterministic Ethernet peer against QEMU's NE2000 model and retains packet captures plus debug-console logs under `build/test-artifacts/` only when the regression fails.
 
-`make test-network-qemu` combines the raw-frame and protocol packet-socket regressions, TCP active-open probe, and general QEMU end-to-end tests. `make test-network` additionally includes the host, sanitizer, and raw ABI suites.
+`make test-network-qemu` combines the raw-frame and protocol packet-socket regressions, TCP handshake and stream probe, and general QEMU end-to-end tests. `make test-network` additionally includes the host, sanitizer, and raw ABI suites.
 
 `make test-build` checks the feasibility manifest, compiler helpers, cache preparation with synthetic archives, and missing and changed Mbed TLS source paths. Clean and fallback builds reuse the prepared source tree. No external SSH sources are needed.
 
@@ -272,8 +270,22 @@ The deterministic tests check a known HMAC-SHA256 answer, the canonical ISN tupl
 
 Independent wire vectors exercise gateway routing, the same-sequence retransmissions, SYN-ACK matching, sequence wrap, duplicate final ACKs, and remote resets. Fake-clock tests cover short caller deadlines, the fixed connection budget, ARP cache refresh and failure, retry exhaustion, and retained terminal causes.
 
-The host tests also advance the clock inside the final send, drive concurrent Ping and TCP refusal or ARP and TCP expiry, and distinguish recovered receive drops from a failed device reset. Zero-window probes must receive an unchanged ACK, including after a bounded ARP refresh, without making bytes available to the application.
+The host tests also advance the clock inside the final send, drive concurrent Ping and TCP refusal or ARP and TCP expiry, and distinguish recovered receive drops from a failed device reset.
 
 `tests/network_phase_e.py` runs the strict-C90 guest probe against a controlled peer on a local QEMU packet socket. The peer compares the full Ethernet frames, injects SYN-ACK or a refusal, and verifies the ACK sequence and checksum. It deliberately ignores one SYN and repeats an accepted SYN-ACK to verify the corresponding retransmissions.
 
-The peer also delivers a routed SYN-ACK and zero-window probe from a MAC other than the configured gateway and checks that the guest sends its control frames to that gateway. The guest verifies an i386 HMAC known-answer vector. With RDRAND disabled, it reports `TCP_ERR_ENTROPY` with an unpublished handle and the peer sees no transmitted frame. Failures retain logs and captures under `build/test-artifacts/`.
+The peer also delivers a routed SYN-ACK from a MAC other than the configured gateway and checks that the guest sends its control frames to that gateway. The guest verifies an i386 HMAC known-answer vector. With RDRAND disabled, it reports `TCP_ERR_ENTROPY` with an unpublished handle and the peer sees no transmitted frame. Failures retain logs and captures under `build/test-artifacts/`.
+
+## Bounded TCP Stream Validation
+
+The deterministic suite verifies copied partial writes, the boundary between sent and unsent bytes, partial ACKs, sender-window freshness, sequence and ring wrap, and reads that do not depend on segment boundaries. Overlap and out-of-order tests check that the receiver neither duplicates bytes nor skips a gap.
+
+The host fills the receive queue to zero credit, probes it, and drains it in chunks to check that the receive right edge advances only when a window update reaches the wire. It also checks progress in both directions during waits and ARP refresh, a validated MAC change, and cleanup after refresh failure, reset, and cancellation.
+
+Fake-clock cases place data and ACKs at and after the exact I/O deadline, including clock wrap. They verify that an already started driver operation can finish without starting another one, that copied prefixes win over a later expiry, and that deferred TCP, ARP, and ICMP replies resume without duplicate receive accounting.
+
+The reset cases check exact, in-window, and out-of-window sequence numbers, including wrap and a closed receive window. They verify that challenge ACKs are empty and rate-limited, can wait for a refreshed next hop without sending queued data, and do not terminate a connection solely because a challenge could not resolve its neighbor.
+
+The QEMU peer checks a routed full-duplex exchange with an independent packet builder. The guest verifies 7,129 bytes from the peer, starting with a one-byte read, and the peer verifies 7,351 bytes from the guest. Both streams contain zero bytes and exceed the entire queue capacity. The peer checks sequence and acknowledgment positions, window credit, and checksums without relying on the guest's segment boundaries.
+
+The clean build regression runs the QEMU probe against images produced with both `ld.lld` and `elf2bin`. This tests the current stream path, not loss recovery or wire-level shutdown.

@@ -181,6 +181,53 @@ int tcp_connect(tcp_handle *handle, const struct tcp_endpoint *endpoint,
     return wait_connect(connection, started_ms, wait_ms);
 }
 
+static int transfer(struct tcp_connection *connection, const void *send_data,
+                     void *receive_data, unsigned int length, unsigned int wait_ms)
+{
+    net_u32 started_ms = net_clock_now_ms();
+    int serviced = 0;
+    int result = net_service_acquire(&net_global_context);
+
+    if (result != 0) {
+        return result;
+    }
+    for (;;) {
+        unsigned int copied;
+
+        if (wait_ms != 0U &&
+            net_timeout_expired(started_ms, net_clock_now_ms(), wait_ms)) {
+            result = NET_ERR_TIMEOUT;
+            break;
+        }
+        copied = send_data != 0 ?
+            tcp_stream_write(connection, send_data, length) :
+            tcp_stream_read(connection, receive_data, length);
+
+        if (copied != 0U) {
+            /* Kick transmission or the window update. At zero wait there is
+             * at most one shared service step, even if it made space. */
+            if (!serviced || wait_ms != 0U) {
+                result = connection_result(connection,
+                    net_service_io_once(&net_global_context, started_ms, wait_ms));
+            }
+            result = tcp_connection_progress_result(copied, result);
+            break;
+        }
+        if (serviced && wait_ms == 0U) {
+            result = TCP_ERR_WOULD_BLOCK;
+            break;
+        }
+        result = connection_result(connection,
+            net_service_io_once(&net_global_context, started_ms, wait_ms));
+        serviced = 1;
+        if (result < 0) {
+            break;
+        }
+    }
+    net_service_release(&net_global_context);
+    return result;
+}
+
 int tcp_send(tcp_handle handle, const void *data, unsigned int length,
               unsigned int wait_ms)
 {
@@ -203,7 +250,13 @@ int tcp_send(tcp_handle handle, const void *data, unsigned int length,
     if (connection->state == TCP_STATE_CONNECTING) {
         return TCP_ERR_WOULD_BLOCK;
     }
-    return length == 0U ? 0 : TCP_ERR_UNSUPPORTED;
+    if (length == 0U) {
+        return 0;
+    }
+    if (connection->state != TCP_STATE_ESTABLISHED || connection->open.local_port == 0U) {
+        return TCP_ERR_UNSUPPORTED;
+    }
+    return transfer(connection, data, 0, length, wait_ms);
 }
 
 int tcp_recv(tcp_handle handle, void *data, unsigned int capacity,
@@ -228,7 +281,10 @@ int tcp_recv(tcp_handle handle, void *data, unsigned int capacity,
     if (connection->state == TCP_STATE_CONNECTING) {
         return TCP_ERR_WOULD_BLOCK;
     }
-    return TCP_ERR_UNSUPPORTED;
+    if (connection->state != TCP_STATE_ESTABLISHED || connection->open.local_port == 0U) {
+        return TCP_ERR_UNSUPPORTED;
+    }
+    return transfer(connection, 0, data, capacity, wait_ms);
 }
 
 int tcp_status(tcp_handle handle, struct tcp_status *status)
@@ -248,7 +304,10 @@ int tcp_status(tcp_handle handle, struct tcp_status *status)
     snapshot.state = connection->state;
     snapshot.terminal_result = connection->terminal_result;
     snapshot.readable_bytes = connection->rx_length;
-    /* No public stream engine yet: never advertise send readiness. */
+    if (connection->state == TCP_STATE_ESTABLISHED &&
+        connection->open.local_port != 0U && !connection->write_shutdown) {
+        snapshot.writable_bytes = TCP_QUEUE_CAPACITY - connection->tx_length;
+    }
     if (connection->rx_length != 0U) {
         snapshot.flags |= TCP_STATUS_READABLE;
     }

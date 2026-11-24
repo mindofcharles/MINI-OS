@@ -290,15 +290,6 @@ static int queue_control(const struct tcp_endpoint *endpoint,
     return network_test_backend_queue_receive(frame, sizeof(frame)) == 0;
 }
 
-static int queue_window_probe(struct control control)
-{
-    unsigned char frame[NET_FRAME_MIN];
-    const unsigned char byte = 0x5AU;
-
-    control_frame(frame, 1, &local_peer, &peer_mac, control, &byte, 1U);
-    return network_test_backend_queue_receive(frame, sizeof(frame)) == 0;
-}
-
 static void arp_reply(unsigned char frame[NET_FRAME_MIN], const struct net_mac_addr *mac)
 {
     static const unsigned char arp_prefix[] = {0x08, 0x06, 0, 1, 8, 0, 6, 4, 0, 2};
@@ -320,7 +311,8 @@ static int status_is(tcp_handle handle, enum tcp_state state, int terminal)
 
     CHECK(tcp_status(handle, &status) == 0 && status.state == state);
     CHECK(status.terminal_result == terminal);
-    CHECK(status.readable_bytes == 0U && status.writable_bytes == 0U);
+    CHECK(status.readable_bytes == 0U &&
+          status.writable_bytes == (state == TCP_STATE_ESTABLISHED ? TCP_QUEUE_CAPACITY : 0U));
     return 1;
 }
 
@@ -336,7 +328,7 @@ static int test_handshake(void)
 {
     const unsigned int port = 55097U, iss = 0x8a313876U, irs = UINT_MAX;
     struct control reply = {22U, port, irs, iss + 1U, 0x12U, 2048U, 600U};
-    struct control ack = {port, 22U, iss + 1U, 0U, 0x10U, 0U, 0U};
+    struct control ack = {port, 22U, iss + 1U, 0U, 0x10U, TCP_QUEUE_CAPACITY, 0U};
     tcp_handle handle = TCP_INVALID_HANDLE;
     struct tcp_active_open *open = &tcp_global_context.connection.open;
     unsigned char frame[NET_FRAME_MIN];
@@ -384,8 +376,8 @@ static int test_handshake(void)
     CHECK(status_is(handle, TCP_STATE_ESTABLISHED, 0));
     CHECK(open->peer_mss == 600U && open->peer_window == 2048U && open->irs == irs);
     CHECK(tcp_connect(&handle, &remote_peer, 0, 0U) == 0);
-    CHECK(tcp_send(handle, &byte, 1U, 0U) == TCP_ERR_UNSUPPORTED);
-    CHECK(tcp_recv(handle, &byte, 1U, 0U) == TCP_ERR_UNSUPPORTED && byte == 0xa5U);
+    CHECK(tcp_send(handle, 0, 0U, 0U) == 0);
+    CHECK(tcp_recv(handle, &byte, 1U, 0U) == TCP_ERR_WOULD_BLOCK && byte == 0xa5U);
     CHECK(tcp_close(handle, 0U) == TCP_ERR_UNSUPPORTED);
     CHECK(tcp_shutdown_write(handle) == TCP_ERR_UNSUPPORTED);
     CHECK(network_test_backend_transmit_count() == 4U);
@@ -505,7 +497,7 @@ static int test_handshake_during_refresh(void)
             CHECK(status_is(handle, TCP_STATE_ESTABLISHED, 0));
             CHECK(expect_control(2, &local_peer, &refreshed_mac,
                                 (struct control){open->local_port, 22U,
-                                    open->iss + 1U, 20U, 0x10U, 0U, 0U}));
+                                    open->iss + 1U, 20U, 0x10U, TCP_QUEUE_CAPACITY, 0U}));
             network_test_backend_clock_advance(3000U);
             CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 3U);
         } else {
@@ -535,7 +527,8 @@ static int test_ack_commit_budget(void)
         CHECK(initialize(&net_config) && start_cached(&handle, &config));
         reply = (struct control){22U, open->local_port, 17U, open->iss + 1U,
                                  0x12U, 16U, 0U};
-        ack = (struct control){open->local_port, 22U, open->iss + 1U, 18U, 0x10U, 0U, 0U};
+        ack = (struct control){open->local_port, 22U, open->iss + 1U, 18U,
+                              0x10U, TCP_QUEUE_CAPACITY, 0U};
         network_test_backend_clock_advance(4U);
         network_test_backend_set_send_clock_step(2U);
         if (failed) {
@@ -625,59 +618,6 @@ static int test_receive_recovery(void)
     return dispose(handle);
 }
 
-static int test_zero_window_ack(void)
-{
-    struct net_config network = net_config;
-    struct tcp_config config;
-    struct tcp_active_open *open = &tcp_global_context.connection.open;
-    tcp_handle handle = TCP_INVALID_HANDLE;
-    struct control peer_ack, local_ack;
-    unsigned char frame[NET_FRAME_MIN];
-
-    network.arp_cache_ttl_ms = 1000U;
-    CHECK(initialize(&network) && tcp_config_defaults(&config) == 0);
-    config.connect_timeout_ms = 5U;
-    CHECK(start_cached(&handle, &config));
-    peer_ack = (struct control){22U, open->local_port, UINT_MAX, open->iss + 1U, 0x12U, 16U, 0U};
-    local_ack = (struct control){open->local_port, 22U, open->iss + 1U, 0U, 0x10U, 0U, 0U};
-    CHECK(queue_control(&local_peer, &peer_mac, peer_ack) && net_poll(0U) == 1);
-    CHECK(status_is(handle, TCP_STATE_ESTABLISHED, 0));
-    peer_ack.flags = 0x10U;
-    peer_ack.sequence = 0U;
-    CHECK(queue_control(&local_peer, &peer_mac, peer_ack) && net_poll(0U) == 0);
-    CHECK(network_test_backend_transmit_count() == 2U);
-    CHECK(queue_window_probe(peer_ack) && net_poll(0U) == 1);
-    CHECK(expect_control(2, &local_peer, &peer_mac, local_ack));
-    peer_ack.sequence = UINT_MAX; /* Zero-length keepalive just before RCV.NXT. */
-    CHECK(queue_control(&local_peer, &peer_mac, peer_ack) && net_poll(0U) == 1);
-    CHECK(expect_control(3, &local_peer, &peer_mac, local_ack));
-
-    network_test_backend_clock_advance(1000U);
-    peer_ack.sequence = 0U;
-    CHECK(queue_window_probe(peer_ack) && net_poll(0U) == 1);
-    CHECK(open->ack_pending && net_global_context.pending_arp.owner == handle);
-    CHECK(network_test_backend_transmit_count() == 4U);
-    CHECK(net_poll(0U) == 1 && network_test_backend_transmit_frame(4)[13] == 0x06U);
-    network_test_backend_clock_advance(1U);
-    CHECK(queue_window_probe(peer_ack) && net_poll(0U) == 0);
-    CHECK(open->ack_started_ms == 1000U && net_global_context.pending_arp.attempts == 1U);
-    arp_reply(frame, &refreshed_mac);
-    CHECK(network_test_backend_queue_receive(frame, sizeof(frame)) == 0);
-    CHECK(net_poll(0U) == 1 && net_poll(0U) == 1);
-    CHECK(expect_control(5, &local_peer, &refreshed_mac, local_ack));
-    CHECK(!open->ack_pending && !net_global_context.pending_arp.active);
-    CHECK(status_is(handle, TCP_STATE_ESTABLISHED, 0));
-
-    network_test_backend_clock_advance(1000U);
-    CHECK(queue_window_probe(peer_ack) && net_poll(0U) == 1);
-    CHECK(net_poll(0U) == 1);
-    network_test_backend_clock_advance(1000U);
-    CHECK(net_poll(0U) == 1);
-    network_test_backend_clock_advance(1000U);
-    CHECK(net_poll(0U) == 1 && status_is(handle, TCP_STATE_FAILED, TCP_ERR_NEIGHBOR_TIMEOUT));
-    return dispose(handle);
-}
-
 static int test_terminal_paths(void)
 {
     tcp_handle handle = TCP_INVALID_HANDLE;
@@ -755,9 +695,9 @@ int test_tcp_active_open(void)
         !test_clock_and_generation() || !test_loss_and_neighbor_refresh() ||
         !test_handshake_during_refresh() || !test_ack_commit_budget() ||
         !test_local_failure_during_other_protocol() || !test_receive_recovery() ||
-        !test_zero_window_ack() || !test_terminal_paths()) {
+        !test_terminal_paths()) {
         return 0;
     }
-    puts("E3 HMAC, entropy, active-open, shared service and zero-window tests: PASS");
+    puts("E3 HMAC, entropy, active-open and shared service tests: PASS");
     return 1;
 }

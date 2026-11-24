@@ -2,6 +2,7 @@
 
 #include "address.h"
 #include "byteorder.h"
+#include "service.h"
 
 #include <string.h>
 
@@ -122,6 +123,9 @@ int net_ethernet_send(struct net_context *context,
     }
 
     context->tx_prepared = 0;
+    if (net_service_io_expired(context)) {
+        return NET_ETHERNET_TX_DEFERRED;
+    }
     result = net_send_frame(context->tx_frame, wire_length);
     if (result == (int)wire_length) {
         return 0;

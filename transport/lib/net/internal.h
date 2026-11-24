@@ -102,6 +102,9 @@ struct net_context {
     struct net_protocol_counters counters;
     struct net_transport_binding transport;
     net_u32 arp_last_request_ms;
+    net_u32 io_started_ms;
+    unsigned int io_wait_ms;
+    unsigned int rx_deferred_length;
     net_u16 next_echo_identifier;
     int arp_request_seen;
     int initialized;

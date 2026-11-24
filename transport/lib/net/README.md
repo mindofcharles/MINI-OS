@@ -6,7 +6,7 @@ Network-library implementations compile as modern C with fatal project warnings,
 
 - The base group contains `raw.c`, `platform.c`, and `time.c` and is selected by raw-frame and higher-level network consumers.
 - The IPv4 group contains initialization, address, byte-order, checksum, Ethernet, ARP, IPv4, ICMP, shared service, and polling code and is selected by `ping`, TCP consumers, and protocol probes.
-- The TCP group contains the interface and connection state, timers, segment codec, sequence arithmetic, ISN generation, and active-open state machine under `tcp/`. It is selected only by named TCP consumers and `test_tcp_contract`.
+- The TCP group contains the interface and connection state, timers, segment codec, sequence arithmetic, ISN generation, active open, and bounded streams under `tcp/`. It is selected only by named TCP consumers and `test_tcp_contract`.
 - The shared crypto group links secure clearing and the HMAC-SHA256 wrapper and pinned implementation with TCP.
 
 The build rejects every source under the network and shared crypto directories that has no group, belongs to more than one group, or is named by a group but absent from the tree.
@@ -29,7 +29,7 @@ The shared service loop rejects reentrancy and dispatches validated unfragmented
 
 ARP learning remains unauthenticated, and options, fragment reassembly, ICMP errors, and an idle-shell Echo server are not implemented.
 
-## TCP active open
+## TCP active open and byte streams
 
 `tcp.h` fixes C90 signatures, error values, configuration defaults, one generation-checked slot, status snapshots, explicit terminal-handle release, and final application-instance teardown.
 
@@ -37,7 +37,13 @@ ARP learning remains unauthenticated, and options, fragment reassembly, ICMP err
 
 One attempt keeps its original connection deadline and SYN retry history across caller waits. Successful transmission of the final ACK commits the handshake. A matching refusal or exhausted protocol budget becomes a retained terminal result and counts as polling work without interrupting other protocols.
 
-The active open advertises a zero receive window and answers peer probes without accepting a byte. The public stream and graceful wire-close operations are unsupported on an established connection.
+The SYN advertises a zero receive window, and the successful final ACK advertises 4 KiB. `tcp_send` copies a partial prefix into a fixed ring, separating unsent and outstanding bytes. `tcp_recv` copies contiguous bytes from another ring and schedules a window update. A full receive queue answers probes without accepting data. Positive wait expiry does not terminate an otherwise live connection.
+
+The shared service applies a positive stream wait deadline before each new raw receive or transmit. Data received by an already started poll remains queued, and pending output can continue in a later service call.
+
+`tcp/stream.c` owns the established stream accounting and uses `tcp/queue.c` for bounded ring copies. `tcp/output.c` shares transmit-frame construction and next-hop resolution with `tcp/open.c`. Neither queue allocates memory nor adds a frame buffer.
+
+The current stream path does not retransmit lost data, run congestion control, probe a closed peer receive window, or process wire-level FIN and EOF.
 
 Private lifecycle helpers retain terminal errors after partial-progress reporting, separate call waits from a once-captured close-grace deadline, reject unread-data loss, and prevent old handles from reaching a new generation.
 
@@ -59,4 +65,6 @@ The encoder supports the fixed TCP header and an optional SYN MSS. It can use pa
 
 `tcp/sequence.h` exposes modular comparison and half-open range checks for 32-bit TCP sequence numbers.
 
-The registered TCP callback processes segments that match the connection tuple. It sends the final ACK again if the peer repeats the accepted SYN-ACK. Control packets use the resolved configured next hop, and one pending ACK can wait across poll calls for the owned ARP refresh.
+The registered TCP callback processes segments that match the connection tuple. A repeat of the accepted SYN-ACK requests an ACK using the current stream state. Transmit uses the resolved configured next hop, and sendable data and a pending ACK can wait across poll calls for the owned ARP refresh.
+
+A reset at the next expected receive sequence fails the connection. A non-exact reset inside the advertised receive window requests a rate-limited empty challenge ACK without changing the stream sequence or the peer's window.

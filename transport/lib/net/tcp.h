@@ -102,7 +102,10 @@ int tcp_connect(tcp_handle *handle, const struct tcp_endpoint *endpoint,
  * A zero-length send on a usable handle returns zero without protocol work.
  * Positive partial progress takes precedence over a newly detected failure,
  * whose cause stays observable on subsequent I/O or status calls.
- * Stream transfer is unsupported until the byte-stream engine is implemented.
+ * Without progress, zero wait returns TCP_ERR_WOULD_BLOCK and a positive
+ * wait expiry returns NET_ERR_TIMEOUT without discarding previously queued bytes.
+ * Positive stream waits check the deadline before starting a copy or a new
+ * raw receive/transmit. A driver operation already started may finish later.
  */
 int tcp_send(tcp_handle handle, const void *data, unsigned int length,
               unsigned int wait_ms);
@@ -111,8 +114,9 @@ int tcp_send(tcp_handle handle, const void *data, unsigned int length,
  * Nonzero capacity and a nonnull buffer are required; packet boundaries vanish.
  * Zero is orderly EOF only after all preceding bytes have been delivered.
  * No progress at zero wait returns TCP_ERR_WOULD_BLOCK, not EOF.
- * Ordinary wait expiry preserves the connection and buffered bytes.
- * Public stream delivery is unsupported in the current foundation.
+ * Ordinary wait expiry preserves the connection and buffered bytes, including
+ * data received by an already started poll but not yet copied to the caller.
+ * Wire-level FIN and orderly EOF are not yet implemented for active connections.
  */
 int tcp_recv(tcp_handle handle, void *data, unsigned int capacity,
               unsigned int wait_ms);
@@ -137,7 +141,7 @@ int tcp_close(tcp_handle handle, unsigned int wait_ms);
 /* Abort terminates immediately but does not release or replace an old cause. */
 int tcp_abort(tcp_handle handle);
 
-/* Snapshot only: no polling, cancellation consumption, or error consumption. */
+/* Snapshot only. writable_bytes is local queue space, not peer window credit. */
 int tcp_status(tcp_handle handle, struct tcp_status *status);
 
 /* Only terminal handles can be released; old generations then become invalid. */

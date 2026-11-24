@@ -243,7 +243,7 @@ def verify_kernel_entry_stub(repo: Path) -> None:
 def verify_deterministic_network_backends(repo: Path) -> None:
     phase_b_marker = b"MINI_OS_PHASE_B_DETERMINISTIC_PLATFORM_ONLY"
     network_marker = b"MINI_OS_NETWORK_DETERMINISTIC_BACKEND_ONLY"
-    run(["make", "test-network-host", "test-network-sanitizers"], repo)
+    run(["make", "test-network-host", "test-network-tcp"], repo)
     phase_b_binary = repo / "build/network-phase-b/platform_test"
     phase_d_binary = repo / "build/network-phase-d/backend_test"
     phase_e_binary = repo / "build/network-phase-e/foundation_test"
@@ -263,11 +263,13 @@ def verify_deterministic_network_backends(repo: Path) -> None:
     header_rebuild = run(
         [
             "make", "-n", "-W", "tests/network_common/deterministic_backend.h",
-            "test-network-host", "test-network-sanitizers",
+            "test-network-host", "test-network-tcp",
         ],
         repo,
     )
     rebuild_lines = header_rebuild.stdout.splitlines()
+    if rebuild_lines.count(phase_e_binary.relative_to(repo).as_posix()) != 1:
+        raise RuntimeError("combined host and TCP targets must run the normal TCP suite once")
     backend_consumers = (
         phase_d_binary,
         repo / "build/network-phase-d/address_test",

@@ -49,7 +49,7 @@ COMPILER_RT_OBJ := $(BUILD_DIR)/compiler_rt.o
 NET_BASE_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,raw.c platform.c time.c)
 NET_PHASE_D2_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,net.c address.c byteorder.c checksum.c)
 NET_IPV4_LIB_SRCS := $(NET_PHASE_D2_LIB_SRCS) $(addprefix $(LIB_DIR)/net/,ethernet.c arp.c ipv4.c icmp.c service.c poll.c)
-NET_TCP_LIB_SRCS := $(addprefix $(LIB_DIR)/net/tcp/,api.c connection.c timers.c codec.c sequence.c isn.c open.c)
+NET_TCP_LIB_SRCS := $(addprefix $(LIB_DIR)/net/tcp/,api.c connection.c timers.c codec.c sequence.c isn.c open.c queue.c output.c stream.c)
 NET_SHARED_CRYPTO_LIB_SRCS := $(addprefix $(LIB_DIR)/crypto/,clear.c hmac_sha256.c)
 
 # Official Mbed TLS release asset. The source commit is in tools/mbedtls_files.sha256.
@@ -149,7 +149,7 @@ NETWORK_PHASE_D_PRIMITIVE_TEST_SRCS := tests/network_phase_d/test_primitives.c $
 NETWORK_PHASE_D_ADDRESS_TEST_BIN := $(BUILD_DIR)/network-phase-d/address_test
 NETWORK_PHASE_D_ADDRESS_TEST_SRCS := tests/network_phase_d/test_address.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/address.c $(LIB_DIR)/net/net.c
 NETWORK_PHASE_D_ETHERNET_TEST_BIN := $(BUILD_DIR)/network-phase-d/ethernet_test
-NETWORK_PHASE_D_ETHERNET_TEST_SRCS := tests/network_phase_d/test_ethernet.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/net.c $(LIB_DIR)/net/address.c $(LIB_DIR)/net/byteorder.c $(LIB_DIR)/net/ethernet.c
+NETWORK_PHASE_D_ETHERNET_TEST_SRCS := tests/network_phase_d/test_ethernet.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/time.c $(LIB_DIR)/net/net.c $(LIB_DIR)/net/address.c $(LIB_DIR)/net/byteorder.c $(LIB_DIR)/net/ethernet.c
 NETWORK_PHASE_D_ARP_TEST_BIN := $(BUILD_DIR)/network-phase-d/arp_test
 NETWORK_PHASE_D_ARP_TEST_SRCS := tests/network_phase_d/test_arp.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/time.c $(LIB_DIR)/net/net.c $(LIB_DIR)/net/address.c $(LIB_DIR)/net/byteorder.c $(LIB_DIR)/net/checksum.c $(LIB_DIR)/net/ethernet.c $(LIB_DIR)/net/arp.c $(LIB_DIR)/net/ipv4.c $(LIB_DIR)/net/icmp.c $(LIB_DIR)/net/service.c $(LIB_DIR)/net/poll.c
 NETWORK_PHASE_D_IPV4_TEST_BIN := $(BUILD_DIR)/network-phase-d/ipv4_test
@@ -159,7 +159,7 @@ NETWORK_PHASE_E_PUBLIC_HEADER_OBJ := $(BUILD_DIR)/network-phase-e/public_header.
 NETWORK_PHASE_E_TEST_BIN := $(BUILD_DIR)/network-phase-e/foundation_test
 NETWORK_PHASE_E_SANITIZER_BIN := $(BUILD_DIR)/network-phase-e/foundation_sanitizer_test
 NETWORK_PHASE_E_ALLOC_HEADER := tests/network_phase_e/hmac_alloc.h
-NETWORK_PHASE_E_HOST_SRCS := tests/network_phase_e/test_foundation.c tests/network_phase_e/test_codec.c tests/network_phase_e/test_open.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/time.c $(NET_IPV4_LIB_SRCS) $(NET_TCP_LIB_SRCS) $(NET_SHARED_CRYPTO_LIB_SRCS) $(MBEDTLS_SRCS)
+NETWORK_PHASE_E_HOST_SRCS := tests/network_phase_e/test_foundation.c tests/network_phase_e/test_codec.c tests/network_phase_e/test_open.c tests/network_phase_e/test_stream.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/time.c $(NET_IPV4_LIB_SRCS) $(NET_TCP_LIB_SRCS) $(NET_SHARED_CRYPTO_LIB_SRCS) $(MBEDTLS_SRCS)
 
 # A partial build can leave different products using different source trees.
 # Compare each product's recorded origin before make evaluates timestamps.
@@ -192,9 +192,9 @@ ELF2BIN_MAX_SECTIONS ?= 4096
 ELF2BIN_MAX_RELOCATIONS ?= 32768
 QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
 
-.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-d3 test-network-d4 test-network-d5 test-network-d6 test-network-e1 test-network-e1-qemu test-network-e2 test-network-sanitizers test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0 network-phase0-host-probe transport-inputs-force
+.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e test-network test-network-host test-network-abi test-network-d1 test-network-d2 test-network-d3 test-network-d4 test-network-d5 test-network-d6 test-network-sanitizers test-network-driver test-network-qemu network-phase0-check network-phase0-selected network-phase0 network-phase0 network-phase0-host-probe transport-inputs-force
 
-.PHONY: deps mbedtls-source-check mbedtls-origin-changed test-network-e3 test-network-e3-qemu
+.PHONY: deps mbedtls-source-check mbedtls-origin-changed test-network-tcp-host test-network-tcp test-network-tcp-qemu
 
 all: check-layout $(OS_IMG)
 
@@ -441,18 +441,15 @@ $(NETWORK_PHASE_E_SANITIZER_BIN): $(NETWORK_PHASE_E_HOST_SRCS) $(NETWORK_TEST_BA
 test-network-sanitizers: $(NETWORK_PHASE_E_SANITIZER_BIN)
 	UBSAN_OPTIONS=halt_on_error=1 $(NETWORK_PHASE_E_SANITIZER_BIN)
 
-test-network-e1: test-network-host $(NET_TCP_LIB_OBJS) $(NET_SHARED_CRYPTO_LIB_OBJS) $(APP_BUILD_DIR)/lib_test/test_tcp_contract.bin
+test-network-tcp-host: $(NETWORK_PHASE_E_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_E_TEST_BIN)
+	$(NETWORK_PHASE_E_TEST_BIN)
 
-test-network-e1-qemu: test-network-e3-qemu
+test-network-tcp: test-network-tcp-host test-network-sanitizers $(APP_BUILD_DIR)/lib_test/test_tcp_contract.bin
 
-test-network-e2: test-network-e1 test-network-sanitizers
-
-test-network-e3: test-network-e2
-
-test-network-e3-qemu: $(OS_IMG) $(CHECK_TOOL)
+test-network-tcp-qemu: $(OS_IMG) $(CHECK_TOOL)
 	$(PYTHON) tests/network_phase_e.py --image $(OS_IMG) --qemu $(QEMU)
 
-test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NETWORK_PHASE_D_ETHERNET_TEST_BIN) $(NETWORK_PHASE_D_ARP_TEST_BIN) $(NETWORK_PHASE_D_IPV4_TEST_BIN) $(NETWORK_PHASE_E_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_E_TEST_BIN) $(NET_IPV4_LIB_OBJS) $(APP_BUILD_DIR)/apps/ping.bin
+test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_OBJ) $(NETWORK_PHASE_D_BACKEND_TEST_BIN) $(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN) $(NETWORK_PHASE_D_ADDRESS_TEST_BIN) $(NETWORK_PHASE_D_ETHERNET_TEST_BIN) $(NETWORK_PHASE_D_ARP_TEST_BIN) $(NETWORK_PHASE_D_IPV4_TEST_BIN) $(NET_IPV4_LIB_OBJS) $(APP_BUILD_DIR)/apps/ping.bin test-network-tcp-host
 	$(NETWORK_PHASE_B_TEST_BIN)
 	$(NETWORK_PHASE_D_BACKEND_TEST_BIN)
 	$(NETWORK_PHASE_D_PRIMITIVE_TEST_BIN)
@@ -460,7 +457,6 @@ test-network-host: $(NETWORK_PHASE_B_TEST_BIN) $(NETWORK_PHASE_D_PUBLIC_HEADER_O
 	$(NETWORK_PHASE_D_ETHERNET_TEST_BIN)
 	$(NETWORK_PHASE_D_ARP_TEST_BIN)
 	$(NETWORK_PHASE_D_IPV4_TEST_BIN)
-	$(NETWORK_PHASE_E_TEST_BIN)
 
 $(NETWORK_PHASE_C_ABI_TEST_BIN): $(NETWORK_PHASE_C_ABI_TEST_SRC) $(LIB_DIR)/net/raw.h $(LIB_DIR)/net/raw.def $(LIB_DIR)/syscall.def Makefile | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
@@ -475,9 +471,9 @@ test-network-driver: $(OS_IMG) $(CHECK_TOOL)
 test-network-d6: $(OS_IMG) $(CHECK_TOOL)
 	$(PYTHON) tests/network_phase_d.py --image $(OS_IMG)
 
-test-network-qemu: test-network-driver test-network-d6 test-network-e3-qemu test-e2e
+test-network-qemu: test-network-driver test-network-d6 test-network-tcp-qemu test-e2e
 
-test-network: test-network-host test-network-abi test-network-sanitizers test-network-qemu
+test-network: test-network-host test-network-abi test-network-tcp test-network-qemu
 
 test: test-network test-build
 

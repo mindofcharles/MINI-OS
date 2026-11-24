@@ -26,9 +26,12 @@ int tcp_connection_timer(void *owner, net_u32 now_ms)
                             connection->config.connect_timeout_ms)) {
         return tcp_connection_fail_event(TCP_ERR_CONNECT_TIMEOUT);
     }
-    if (connection->state == TCP_STATE_CONNECTING ||
-        connection->state == TCP_STATE_ESTABLISHED) {
+    if (connection->state == TCP_STATE_CONNECTING) {
         return tcp_open_timer(connection, now_ms);
+    }
+    if (connection->state == TCP_STATE_ESTABLISHED &&
+        connection->open.local_port != 0U) {
+        return tcp_stream_output(connection);
     }
     return 0;
 }

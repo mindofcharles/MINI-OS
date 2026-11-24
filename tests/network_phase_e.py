@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the public TCP active open against a controlled QEMU wire peer."""
+"""Exercise TCP active open and byte streams against a controlled QEMU peer."""
 
 from __future__ import annotations
 
@@ -26,9 +26,12 @@ ROUTED_IP = bytes((192, 0, 2, 9))
 ROUTED_INGRESS_MAC = bytes.fromhex("02 00 00 00 00 09")
 PEER_PORT = 22
 PEER_SEQUENCE = 0xFFFFFFFF
-SYN, RST, ACK = 0x02, 0x04, 0x10
+SYN, RST, PSH, ACK = 0x02, 0x04, 0x08, 0x10
 GUEST_MSS = bytes.fromhex("02 04 02 18")
 PEER_MSS = bytes.fromhex("02 04 05 b4")
+STREAM_MSS = bytes.fromhex("02 04 01 37")
+QUEUE_CAPACITY = 4096
+STREAM_TX_COUNT, STREAM_RX_COUNT = 7351, 7129
 APP = "run /transport/build/lib_test/test_tcp_contract.bin"
 PROMPT = "/ > "
 TIMEOUT = 15.0
@@ -81,11 +84,56 @@ def expect_silent(peer: socket.socket, mode: str) -> None:
     raise RuntimeError(f"expected a quiet packet socket after {mode}, got {data!r}")
 
 
+def stream_bytes(offset: int, length: int, salt: int) -> bytes:
+    return bytes((index * 29 + index // 251 + salt) & 0xFF
+                 for index in range(offset, offset + length))
+
+
+def exchange_stream(peer: socket.socket, local_port: int, first_sequence: int) -> None:
+    received = supplied = acknowledged = last_ack = 0
+    right = QUEUE_CAPACITY
+
+    for index in range(512):
+        size = min(right - supplied, STREAM_RX_COUNT - supplied, 193 if index % 2 else 277)
+        if size or last_ack != received:
+            send_frame(peer, tcp_frame(
+                PEER_PORT, local_port, supplied, (first_sequence + received) & 0xFFFFFFFF,
+                ACK, 400, payload=stream_bytes(supplied, size, 77), routed=True,
+            ))
+            supplied += size
+            last_ack = received
+        if (received == STREAM_TX_COUNT and acknowledged == STREAM_RX_COUNT and
+                right == STREAM_RX_COUNT + QUEUE_CAPACITY):
+            return
+
+        actual = recv_frame(peer)
+        length = struct.unpack_from("!H", actual, 16)[0] - 40
+        next_ack, offset, flags, window = struct.unpack_from("!IBBH", actual, 42)
+        require(acknowledged <= next_ack <= supplied, "guest ACK is outside the peer's stream")
+        require(right <= next_ack + window <= next_ack + QUEUE_CAPACITY,
+                "guest withdrew receive credit or exceeded its queue")
+        require(0 <= length <= 311 and length + received <= STREAM_TX_COUNT,
+                "guest exceeded its effective MSS or the stream length")
+        require(offset == 0x50 and
+                (flags == ACK or (length != 0 and flags == (ACK | PSH))),
+                "unexpected TCP stream options or flags")
+        expected = tcp_frame(
+            local_port, PEER_PORT, (first_sequence + received) & 0xFFFFFFFF,
+            next_ack, flags, window, payload=stream_bytes(received, length, 0),
+            routed=True, from_guest=True,
+        )
+        require(actual == expected, f"guest stream differs at byte {received}")
+        received += length
+        acknowledged = next_ack
+        right = next_ack + window
+    raise RuntimeError("E4 streams did not complete within the peer frame bound")
+
+
 def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
               *, retry_syn: bool = False) -> None:
     start = vm.send_command(f"{APP} {mode}")
     if mode != "entropy":
-        routed = mode == "routed"
+        routed = mode in ("routed", "stream")
         expect_frame(peer, arp_frame(1, b"\xff" * 6, GUEST_MAC, GUEST_IP,
                                      b"\x00" * 6, PEER_IP), "guest ARP request")
         send_frame(peer, arp_frame(2, GUEST_MAC, PEER_MAC, PEER_IP,
@@ -104,19 +152,22 @@ def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
             send_frame(peer, tcp_frame(PEER_PORT, local_port, 0, next_sequence,
                                        RST | ACK))
         else:
+            stream = mode == "stream"
             syn_ack = tcp_frame(PEER_PORT, local_port, PEER_SEQUENCE, next_sequence,
-                                SYN | ACK, 4096, PEER_MSS, routed=routed)
+                                SYN | ACK, 400 if stream else 4096,
+                                STREAM_MSS if stream else PEER_MSS, routed=routed)
             expected_ack = tcp_frame(local_port, PEER_PORT, next_sequence, 0, ACK,
-                                     routed=routed, from_guest=True)
+                                     QUEUE_CAPACITY, routed=routed, from_guest=True)
             send_frame(peer, syn_ack)
             expect_frame(peer, expected_ack, "final ACK")
-            send_frame(peer, syn_ack)
-            expect_frame(peer, expected_ack, "repeated final ACK")
-            send_frame(peer, tcp_frame(PEER_PORT, local_port, 0, next_sequence,
-                                       ACK, 4096, payload=b"p", routed=routed))
-            expect_frame(peer, expected_ack, "zero-window probe ACK")
+            if stream:
+                exchange_stream(peer, local_port, next_sequence)
+            else:
+                send_frame(peer, syn_ack)
+                expect_frame(peer, expected_ack, "repeated final ACK")
     segment = vm.wait_for(PROMPT, start, TIMEOUT)
-    require(f"E3 TCP {mode}: PASS" in segment,
+    marker = "E4 TCP stream: PASS" if mode == "stream" else f"E3 TCP {mode}: PASS"
+    require(marker in segment,
             f"TCP guest omitted {mode} PASS:\n{segment}")
     expect_silent(peer, mode)
 
@@ -152,6 +203,7 @@ def main() -> int:
                         if mode == "open":
                             run_probe(vm, peer, "routed")
                             run_probe(vm, peer, "refuse")
+                            run_probe(vm, peer, "stream")
                     vm.command_expect("pwd", PROMPT)
                 finally:
                     vm.stop()
@@ -166,7 +218,7 @@ def main() -> int:
                         shutil.copy2(path, destination / path.name)
                     print(f"E3 failure artifacts retained in {destination}", file=sys.stderr)
                 raise
-    print("E3 QEMU active open, routing, zero-window ACK, refusal, entropy and guards: PASS")
+    print("E3/E4 QEMU active open, routing, bounded duplex byte streams and guards: PASS")
     return 0
 
 

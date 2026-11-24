@@ -13,6 +13,8 @@ static const struct net_config network = {
 static const struct tcp_endpoint endpoint = {{{10U, 0U, 2U, 2U}}, 22U};
 static const struct tcp_endpoint routed_endpoint = {{{192U, 0U, 2U, 9U}}, 22U};
 
+enum { STREAM_TX_COUNT = 7351, STREAM_RX_COUNT = 7129 };
+
 static int check_hmac_vector(void)
 {
     static const unsigned char input[] = "Hi There";
@@ -94,21 +96,91 @@ static int check_open(const struct tcp_config *config,
     } else if (result != 0 ||
                tcp_status(handle, &status) != 0 ||
                status.state != TCP_STATE_ESTABLISHED ||
-               status.readable_bytes != 0U || status.writable_bytes != 0U ||
-               tcp_send(handle, &byte, 1U, 0U) != TCP_ERR_UNSUPPORTED ||
-               tcp_recv(handle, &byte, 1U, 0U) != TCP_ERR_UNSUPPORTED ||
+               status.readable_bytes != 0U || status.writable_bytes != TCP_QUEUE_CAPACITY ||
+               tcp_send(handle, 0, 0U, 0U) != 0 ||
                tcp_close(handle, 0U) != TCP_ERR_UNSUPPORTED ||
                tcp_shutdown_write(handle) != TCP_ERR_UNSUPPORTED ||
-               byte != 0xA5U || net_poll(10000U) <= 0 ||
                net_poll(10000U) <= 0 ||
                tcp_status(handle, &status) != 0 ||
-               status.readable_bytes != 0U || status.writable_bytes != 0U ||
+               status.readable_bytes != 0U || status.writable_bytes != TCP_QUEUE_CAPACITY ||
                status.state != TCP_STATE_ESTABLISHED || tcp_abort(handle) != 0) {
         printf("E3 TCP handshake or ACK response result: %d\n", result);
         return 0;
     }
     return tcp_release(handle) == 0 &&
            tcp_status(handle, &status) == NET_ERR_STATE && check_disabled();
+}
+
+static unsigned char stream_byte(unsigned int index, unsigned int salt)
+{
+    return (unsigned char)(index * 29U + index / 251U + salt);
+}
+
+static int check_stream(const struct tcp_config *config)
+{
+    unsigned char buffer[383];
+    struct tcp_status status;
+    tcp_handle handle = TCP_INVALID_HANDLE;
+    unsigned int sent = 0U;
+    unsigned int received = 0U;
+    unsigned int started, count, index;
+    int result;
+
+    result = tcp_connect(&handle, &routed_endpoint, config, 10000U);
+    if (result != 0) {
+        printf("E4 TCP stream connect: %d\n", result);
+        return 0;
+    }
+    started = net_clock_now_ms();
+    while (!net_timeout_expired(started, net_clock_now_ms(), 20000U)) {
+        if (sent < STREAM_TX_COUNT) {
+            count = STREAM_TX_COUNT - sent;
+            if (count > sizeof(buffer)) {
+                count = sizeof(buffer);
+            }
+            for (index = 0U; index < count; ++index) {
+                buffer[index] = stream_byte(sent + index, 0U);
+            }
+            result = tcp_send(handle, buffer, count, 0U);
+            if (result > 0 && (unsigned int)result <= count) {
+                sent += (unsigned int)result;
+            } else if (result != TCP_ERR_WOULD_BLOCK) {
+                break;
+            }
+        }
+        if (received < STREAM_RX_COUNT) {
+            count = STREAM_RX_COUNT - received;
+            if (received == 0U) {
+                count = 1U;
+            } else if (count > sizeof(buffer)) {
+                count = sizeof(buffer);
+            }
+            result = tcp_recv(handle, buffer, count, 0U);
+            if (result > 0 && (unsigned int)result <= count) {
+                for (index = 0U; index < (unsigned int)result; ++index) {
+                    if (buffer[index] != stream_byte(received + index, 77U)) {
+                        printf("E4 TCP stream byte mismatch at %u\n", received + index);
+                        return 0;
+                    }
+                }
+                received += (unsigned int)result;
+            } else if (result != TCP_ERR_WOULD_BLOCK) {
+                break;
+            }
+        }
+        result = net_poll(0U);
+        if (result < 0 || tcp_status(handle, &status) != 0 ||
+            status.state != TCP_STATE_ESTABLISHED) {
+            break;
+        }
+        if (sent == STREAM_TX_COUNT && received == STREAM_RX_COUNT &&
+            status.readable_bytes == 0U && status.writable_bytes == TCP_QUEUE_CAPACITY) {
+            return tcp_abort(handle) == 0 && tcp_release(handle) == 0 && check_disabled();
+        }
+    }
+    printf("E4 TCP stream stopped after %u sent and %u received, result %d\n",
+           sent, received, result);
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -124,6 +196,10 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "entropy") == 0) {
         success = tcp_connect(&handle, &endpoint, &config, 0U) == TCP_ERR_ENTROPY &&
                   handle == TCP_INVALID_HANDLE && check_disabled();
+    } else if (strcmp(argv[1], "stream") == 0) {
+        success = check_stream(&config);
+        printf("E4 TCP stream: %s\n", success ? "PASS" : "FAIL");
+        return success ? 0 : 1;
     } else if (strcmp(argv[1], "open") == 0 || strcmp(argv[1], "routed") == 0 ||
                strcmp(argv[1], "refuse") == 0) {
         success = check_open(&config, strcmp(argv[1], "routed") == 0 ?
