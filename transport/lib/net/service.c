@@ -72,6 +72,18 @@ int net_service_fail(struct net_context *context, int result)
     return result;
 }
 
+static int finish_receive(struct net_context *context, int actions)
+{
+    int result;
+
+    if (context->transport.after_receive == 0) {
+        return actions;
+    }
+    result = context->transport.after_receive(context->transport.owner);
+    return result < 0 ? net_service_fail(context, result) :
+           actions + (result != 0);
+}
+
 /* At most one raw receive and bounded timer/dispatch work under one guard. */
 int net_service_once(struct net_context *context, net_u32 started_ms,
                        unsigned int wait_ms)
@@ -131,7 +143,7 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
         return net_service_fail(context, NET_ERR_CANCELLED);
     }
     if (received == 0) {
-        return actions;
+        return finish_receive(context, actions);
     }
     classification = net_ethernet_decode(context, (unsigned int)received,
                                           &view);
@@ -149,7 +161,7 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
             /* Count a saved request only once, when it is dispatched. */
             --context->counters.received_frames;
         }
-        return actions;
+        return finish_receive(context, actions);
     }
     context->rx_deferred_length = 0U;
     if (classification == NET_ETHERNET_ARP) {
@@ -164,10 +176,10 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
          * TCP copied its data and retains pending output in its own state. */
         context->rx_deferred_length = (unsigned int)received;
         --context->counters.received_frames;
-        return actions;
+        return finish_receive(context, actions);
     }
     return result < 0 ? net_service_fail(context, result) :
-           actions + (result != 0);
+           finish_receive(context, actions + (result != 0));
 }
 
 int net_service_io_once(struct net_context *context, net_u32 started_ms,

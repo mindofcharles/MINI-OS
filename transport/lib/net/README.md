@@ -43,7 +43,9 @@ The shared service applies a positive stream wait deadline before each new raw r
 
 `tcp/stream.c` owns the established stream accounting and uses `tcp/queue.c` for bounded ring copies. `tcp/output.c` shares transmit-frame construction and next-hop resolution with `tcp/open.c`. Neither queue allocates memory nor adds a frame buffer.
 
-The current stream path does not retransmit lost data, run congestion control, probe a closed peer receive window, or process wire-level FIN and EOF.
+`tcp/rto.c` tracks the timed sequence range, estimates RTT from unambiguous acknowledgments, and backs off after successful timeout retries. The retry reads bytes from the existing ring and shares the normal output path and transmit frame. The no-progress limit for a nonempty queue remains independent of each caller wait and the RTO.
+
+The current stream path does not run congestion control, probe a closed peer receive window, or process wire-level FIN and EOF.
 
 Private lifecycle helpers retain terminal errors after partial-progress reporting, separate call waits from a once-captured close-grace deadline, reject unread-data loss, and prevent old handles from reaching a new generation.
 

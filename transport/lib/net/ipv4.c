@@ -104,7 +104,8 @@ int net_ipv4_handle(struct net_context *context,
 int net_ipv4_send(struct net_context *context,
                   const struct net_ipv4_addr *destination,
                   const struct net_mac_addr *next_hop_mac,
-                  net_u8 protocol, unsigned int payload_length)
+                  net_u8 protocol, unsigned int payload_length,
+                  const struct net_tx_deadline *deadline)
 {
     struct net_ipv4_addr selected_hop;
     unsigned char *ip;
@@ -137,6 +138,6 @@ int net_ipv4_send(struct net_context *context,
     memcpy(ip + 16U, destination->octets, 4U);
     net_write_be16(ip + 10U,
                    net_checksum_compute(ip, NET_IPV4_HEADER_SIZE));
-    return net_ethernet_send(context, next_hop_mac, NET_ETHERTYPE_IPV4,
-                             NET_IPV4_HEADER_SIZE + payload_length);
+    return net_ethernet_send_before(context, next_hop_mac, NET_ETHERTYPE_IPV4,
+                                    NET_IPV4_HEADER_SIZE + payload_length, deadline);
 }

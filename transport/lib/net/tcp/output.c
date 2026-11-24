@@ -53,7 +53,7 @@ int tcp_resolve_neighbor(const struct tcp_connection *connection,
 
 int tcp_transmit(const struct tcp_connection *connection,
                  const struct net_mac_addr *mac, struct tcp_segment_view *segment,
-                 unsigned int tx_offset)
+                 unsigned int tx_offset, const struct net_tx_deadline *deadline)
 {
     struct net_context *context = &net_global_context;
     net_u8 *wire;
@@ -89,5 +89,5 @@ int tcp_transmit(const struct tcp_connection *connection,
         return length;
     }
     return net_ipv4_send(context, &connection->endpoint.address,
-                         mac, NET_IPV4_PROTOCOL_TCP, (unsigned int)length);
+                         mac, NET_IPV4_PROTOCOL_TCP, (unsigned int)length, deadline);
 }

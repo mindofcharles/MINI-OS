@@ -1,6 +1,6 @@
 # Network
 
-Phase 0 through Phase D are complete. E1 through E4 cover the TCP foundation, segment codec, secure active open, and bounded bidirectional streams. E5 is next.
+Phase 0 through Phase D are complete. E1 through E4 cover the TCP foundation, segment codec, secure active open, and bounded bidirectional streams. E5a adds timed data retransmission. E5b congestion control is next.
 
 - Phase 0: select and measure the SSH and cryptographic libraries. Complete.
 
@@ -12,7 +12,7 @@ Phase 0 through Phase D are complete. E1 through E4 cover the TCP foundation, se
 
 - Phase D: implement Ethernet, ARP, static IPv4, and ICMP. D1 through D5 implementation and host tests, plus D6 deterministic and user-network QEMU protocol acceptance, are complete.
 
-- Phase E will deliver one active TCP connection and `netcat`. The handshake and bounded streams are working. Loss recovery, connection shutdown, and the diagnostic client are still planned.
+- Phase E will deliver one active TCP connection and `netcat`. The handshake, bounded streams, and timed data retransmission work. Congestion control, sender zero-window probing, idle waits, connection shutdown, and the diagnostic client are still planned.
 
 - Phases F and G: port the selected SSH stack and add a pinned-host remote-command client. Planned.
 

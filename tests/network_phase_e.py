@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise TCP active open and byte streams against a controlled QEMU peer."""
+"""Exercise TCP active open, byte streams and retransmission with a QEMU peer."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ PEER_MSS = bytes.fromhex("02 04 05 b4")
 STREAM_MSS = bytes.fromhex("02 04 01 37")
 QUEUE_CAPACITY = 4096
 STREAM_TX_COUNT, STREAM_RX_COUNT = 7351, 7129
+RETRY_BYTES = bytes.fromhex("45 00 35 61 ff 0d 00 80 42")
 APP = "run /transport/build/lib_test/test_tcp_contract.bin"
 PROMPT = "/ > "
 TIMEOUT = 15.0
@@ -129,11 +130,22 @@ def exchange_stream(peer: socket.socket, local_port: int, first_sequence: int) -
     raise RuntimeError("E4 streams did not complete within the peer frame bound")
 
 
+def recover_dropped_data(peer: socket.socket, local_port: int, first_sequence: int) -> None:
+    expected = tcp_frame(local_port, PEER_PORT, first_sequence, 0, ACK | PSH,
+                         QUEUE_CAPACITY, payload=RETRY_BYTES, routed=True, from_guest=True)
+    expect_frame(peer, expected, "first data transmission")
+    # Discard the first copy: the peer advances its ACK only after seeing the retry.
+    expect_frame(peer, expected, "retransmitted data at the same sequence")
+    acknowledgment = (first_sequence + len(RETRY_BYTES)) & 0xFFFFFFFF
+    send_frame(peer, tcp_frame(PEER_PORT, local_port, 0, acknowledgment,
+                               ACK, QUEUE_CAPACITY, routed=True))
+
+
 def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
               *, retry_syn: bool = False) -> None:
     start = vm.send_command(f"{APP} {mode}")
     if mode != "entropy":
-        routed = mode in ("routed", "stream")
+        routed = mode in ("routed", "stream", "retransmit")
         expect_frame(peer, arp_frame(1, b"\xff" * 6, GUEST_MAC, GUEST_IP,
                                      b"\x00" * 6, PEER_IP), "guest ARP request")
         send_frame(peer, arp_frame(2, GUEST_MAC, PEER_MAC, PEER_IP,
@@ -162,11 +174,16 @@ def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
             expect_frame(peer, expected_ack, "final ACK")
             if stream:
                 exchange_stream(peer, local_port, next_sequence)
+            elif mode == "retransmit":
+                recover_dropped_data(peer, local_port, next_sequence)
             else:
                 send_frame(peer, syn_ack)
                 expect_frame(peer, expected_ack, "repeated final ACK")
     segment = vm.wait_for(PROMPT, start, TIMEOUT)
-    marker = "E4 TCP stream: PASS" if mode == "stream" else f"E3 TCP {mode}: PASS"
+    marker = {
+        "stream": "E4 TCP stream: PASS",
+        "retransmit": "E5a TCP retransmit: PASS",
+    }.get(mode, f"E3 TCP {mode}: PASS")
     require(marker in segment,
             f"TCP guest omitted {mode} PASS:\n{segment}")
     expect_silent(peer, mode)
@@ -181,12 +198,12 @@ def main() -> int:
     source = args.image.resolve()
     if not source.is_file():
         parser.error("--image must name an existing image")
-    with tempfile.TemporaryDirectory(prefix="mini-os-network-e3-") as directory:
+    with tempfile.TemporaryDirectory(prefix="mini-os-network-tcp-") as directory:
         temp = Path(directory)
         for mode, cpu in (("open", "max,rdrand=on"), ("entropy", "qemu32,rdrand=off")):
-            image = temp / f"e3-{mode}.img"
-            log = temp / f"e3-{mode}.log"
-            capture = temp / f"e3-{mode}.pcap"
+            image = temp / f"tcp-{mode}.img"
+            log = temp / f"tcp-{mode}.log"
+            capture = temp / f"tcp-{mode}.pcap"
             port = reserve_port()
             vm = VirtualMachine(
                 image, log, args.qemu, 220 if mode == "open" else 221,
@@ -204,6 +221,7 @@ def main() -> int:
                             run_probe(vm, peer, "routed")
                             run_probe(vm, peer, "refuse")
                             run_probe(vm, peer, "stream")
+                            run_probe(vm, peer, "retransmit")
                     vm.command_expect("pwd", PROMPT)
                 finally:
                     vm.stop()
@@ -213,12 +231,12 @@ def main() -> int:
                 if available:
                     root = repo / "build/test-artifacts"
                     root.mkdir(parents=True, exist_ok=True)
-                    destination = Path(tempfile.mkdtemp(prefix="e3-failure-", dir=root))
+                    destination = Path(tempfile.mkdtemp(prefix="tcp-failure-", dir=root))
                     for path in available:
                         shutil.copy2(path, destination / path.name)
-                    print(f"E3 failure artifacts retained in {destination}", file=sys.stderr)
+                    print(f"TCP failure artifacts retained in {destination}", file=sys.stderr)
                 raise
-    print("E3/E4 QEMU active open, routing, bounded duplex byte streams and guards: PASS")
+    print("TCP QEMU active open, routed streams, retransmission and guards: PASS")
     return 0
 
 
@@ -226,5 +244,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (OSError, RuntimeError) as error:
-        print(f"E3 guest contract: FAIL: {error}", file=sys.stderr)
+        print(f"TCP guest contract: FAIL: {error}", file=sys.stderr)
         raise SystemExit(1)

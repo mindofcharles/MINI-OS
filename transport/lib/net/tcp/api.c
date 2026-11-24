@@ -192,15 +192,20 @@ static int transfer(struct tcp_connection *connection, const void *send_data,
         return result;
     }
     for (;;) {
+        net_u32 now_ms = !serviced && wait_ms == 0U ? started_ms : net_clock_now_ms();
         unsigned int copied;
 
+        if (tcp_stream_transmit_expired(connection, now_ms)) {
+            result = tcp_connection_fail(TCP_ERR_TRANSMIT_TIMEOUT);
+            break;
+        }
         if (wait_ms != 0U &&
-            net_timeout_expired(started_ms, net_clock_now_ms(), wait_ms)) {
+            net_timeout_expired(started_ms, now_ms, wait_ms)) {
             result = NET_ERR_TIMEOUT;
             break;
         }
         copied = send_data != 0 ?
-            tcp_stream_write(connection, send_data, length) :
+            tcp_stream_write(connection, send_data, length, now_ms) :
             tcp_stream_read(connection, receive_data, length);
 
         if (copied != 0U) {

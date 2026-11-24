@@ -49,7 +49,7 @@ COMPILER_RT_OBJ := $(BUILD_DIR)/compiler_rt.o
 NET_BASE_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,raw.c platform.c time.c)
 NET_PHASE_D2_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,net.c address.c byteorder.c checksum.c)
 NET_IPV4_LIB_SRCS := $(NET_PHASE_D2_LIB_SRCS) $(addprefix $(LIB_DIR)/net/,ethernet.c arp.c ipv4.c icmp.c service.c poll.c)
-NET_TCP_LIB_SRCS := $(addprefix $(LIB_DIR)/net/tcp/,api.c connection.c timers.c codec.c sequence.c isn.c open.c queue.c output.c stream.c)
+NET_TCP_LIB_SRCS := $(addprefix $(LIB_DIR)/net/tcp/,api.c connection.c timers.c codec.c sequence.c isn.c open.c queue.c output.c stream.c rto.c)
 NET_SHARED_CRYPTO_LIB_SRCS := $(addprefix $(LIB_DIR)/crypto/,clear.c hmac_sha256.c)
 
 # Official Mbed TLS release asset. The source commit is in tools/mbedtls_files.sha256.
@@ -159,7 +159,7 @@ NETWORK_PHASE_E_PUBLIC_HEADER_OBJ := $(BUILD_DIR)/network-phase-e/public_header.
 NETWORK_PHASE_E_TEST_BIN := $(BUILD_DIR)/network-phase-e/foundation_test
 NETWORK_PHASE_E_SANITIZER_BIN := $(BUILD_DIR)/network-phase-e/foundation_sanitizer_test
 NETWORK_PHASE_E_ALLOC_HEADER := tests/network_phase_e/hmac_alloc.h
-NETWORK_PHASE_E_HOST_SRCS := tests/network_phase_e/test_foundation.c tests/network_phase_e/test_codec.c tests/network_phase_e/test_open.c tests/network_phase_e/test_stream.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/time.c $(NET_IPV4_LIB_SRCS) $(NET_TCP_LIB_SRCS) $(NET_SHARED_CRYPTO_LIB_SRCS) $(MBEDTLS_SRCS)
+NETWORK_PHASE_E_HOST_SRCS := tests/network_phase_e/test_foundation.c tests/network_phase_e/test_codec.c tests/network_phase_e/test_open.c tests/network_phase_e/test_stream.c tests/network_phase_e/test_rto.c $(NETWORK_TEST_BACKEND_SRC) $(LIB_DIR)/net/time.c $(NET_IPV4_LIB_SRCS) $(NET_TCP_LIB_SRCS) $(NET_SHARED_CRYPTO_LIB_SRCS) $(MBEDTLS_SRCS)
 
 # A partial build can leave different products using different source trees.
 # Compare each product's recorded origin before make evaluates timestamps.

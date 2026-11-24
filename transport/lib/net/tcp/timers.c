@@ -31,7 +31,21 @@ int tcp_connection_timer(void *owner, net_u32 now_ms)
     }
     if (connection->state == TCP_STATE_ESTABLISHED &&
         connection->open.local_port != 0U) {
-        return tcp_stream_output(connection);
+        return tcp_stream_output(connection, now_ms);
+    }
+    return 0;
+}
+
+int tcp_connection_after_receive(void *owner)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+
+    if (owner != &tcp_global_context) {
+        return NET_ERR_STATE;
+    }
+    if (connection->state == TCP_STATE_ESTABLISHED &&
+        connection->open.local_port != 0U) {
+        return tcp_stream_after_receive(connection);
     }
     return 0;
 }

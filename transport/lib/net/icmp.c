@@ -77,7 +77,7 @@ static int send_echo(struct net_context *context,
         context->pending_echo.sent_ms = net_clock_now_ms();
     }
     return net_ipv4_send(context, destination, next_hop_mac,
-                          NET_IPV4_PROTOCOL_ICMP, icmp_length);
+                          NET_IPV4_PROTOCOL_ICMP, icmp_length, 0);
 }
 
 int net_icmp_send_request(struct net_context *context,

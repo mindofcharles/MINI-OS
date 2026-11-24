@@ -18,11 +18,18 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
 int net_service_io_once(struct net_context *context, net_u32 started_ms,
                           unsigned int wait_ms);
 
+static inline int net_service_io_expired_at(const struct net_context *context,
+                                            net_u32 now_ms)
+{
+    return context->io_wait_ms != 0U &&
+           net_timeout_expired(context->io_started_ms, now_ms,
+                               context->io_wait_ms);
+}
+
 static inline int net_service_io_expired(const struct net_context *context)
 {
     return context->io_wait_ms != 0U &&
-           net_timeout_expired(context->io_started_ms, net_clock_now_ms(),
-                               context->io_wait_ms);
+           net_service_io_expired_at(context, net_clock_now_ms());
 }
 
 #endif

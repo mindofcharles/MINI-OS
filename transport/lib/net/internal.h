@@ -54,13 +54,14 @@ struct net_ipv4_view;
 
 /*
  * Private optional protocol binding, copied on registration.
- * Input and timer callbacks report local state changes as positive work.
+ * Service callbacks report local state changes as positive work.
  * Negative results are shared network failures, not connection-local errors.
  */
 struct net_transport_binding {
     int (*input)(void *owner, const struct net_ethernet_view *ethernet,
                  const struct net_ipv4_view *packet);
     int (*timer)(void *owner, net_u32 now_ms);
+    int (*after_receive)(void *owner); /* Optional, after one input slot. */
     void (*failure)(void *owner, int result);
     void *owner;
     net_u8 protocol;

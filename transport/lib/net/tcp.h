@@ -65,7 +65,7 @@ struct tcp_endpoint {
 struct tcp_config {
     unsigned int connect_timeout_ms;
     unsigned int close_grace_ms;
-    unsigned int transmit_timeout_ms;
+    unsigned int transmit_timeout_ms; /* No cumulative ACK progress with data queued. */
 };
 
 struct tcp_status {
@@ -104,6 +104,8 @@ int tcp_connect(tcp_handle *handle, const struct tcp_endpoint *endpoint,
  * whose cause stays observable on subsequent I/O or status calls.
  * Without progress, zero wait returns TCP_ERR_WOULD_BLOCK and a positive
  * wait expiry returns NET_ERR_TIMEOUT without discarding previously queued bytes.
+ * The separate transmit timeout can end a stalled connection with
+ * TCP_ERR_TRANSMIT_TIMEOUT; retry exhaustion reports TCP_ERR_RETRIES.
  * Positive stream waits check the deadline before starting a copy or a new
  * raw receive/transmit. A driver operation already started may finish later.
  */

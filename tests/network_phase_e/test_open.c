@@ -454,6 +454,7 @@ static int test_loss_and_neighbor_refresh(void)
     reply = (struct control){22U, syn.source_port, 17U, syn.sequence + 1U, 0x12U, 0U, 0U};
     CHECK(queue_control(&local_peer, &refreshed_mac, reply) && net_poll(0U) == 1);
     CHECK(status_is(handle, TCP_STATE_ESTABLISHED, 0) && open->peer_mss == 536U);
+    CHECK(tcp_global_context.connection.stream.rto.wait_ms == 3000U);
     reply.flags = 4U;
     CHECK(queue_control(&local_peer, &peer_mac, reply) && net_poll(0U) == 0);
     ++reply.sequence;
@@ -495,6 +496,8 @@ static int test_handshake_during_refresh(void)
             CHECK(net_poll(0U) == 1 && status_is(handle, TCP_STATE_CONNECTING, 0));
             CHECK(tcp_connect(&handle, &local_peer, 0, 0U) == 0);
             CHECK(status_is(handle, TCP_STATE_ESTABLISHED, 0));
+            CHECK(open->syn_transmissions == 1U &&
+                  tcp_global_context.connection.stream.rto.wait_ms == 3000U);
             CHECK(expect_control(2, &local_peer, &refreshed_mac,
                                 (struct control){open->local_port, 22U,
                                     open->iss + 1U, 20U, 0x10U, TCP_QUEUE_CAPACITY, 0U}));
@@ -511,6 +514,50 @@ static int test_handshake_during_refresh(void)
         CHECK(!net_global_context.pending_arp.active && dispose(handle));
     }
     return 1;
+}
+
+static int test_syn_rto_receive_boundary(void)
+{
+    struct tcp_active_open *open = &tcp_global_context.connection.open;
+    struct net_config config = net_config;
+    tcp_handle handle = TCP_INVALID_HANDLE;
+    struct control syn_ack;
+    unsigned char frame[NET_FRAME_MIN];
+
+    for (unsigned int step = 0U; step <= 1U; ++step) {
+        handle = TCP_INVALID_HANDLE;
+        CHECK(initialize(&net_config) && start_cached(&handle, 0));
+        network_test_backend_clock_advance(999U);
+        network_test_backend_set_receive_clock_step(step);
+        syn_ack = (struct control){
+            22U, open->local_port, 19U, open->iss + 1U, 0x12U, 128U, 0U
+        };
+        CHECK(queue_control(&local_peer, &peer_mac, syn_ack) && net_poll(0U) == 1);
+        CHECK(status_is(handle, TCP_STATE_ESTABLISHED, 0));
+        CHECK(open->syn_transmissions == 1U &&
+              tcp_global_context.connection.stream.rto.wait_ms == (step == 0U ? 1000U : 3000U));
+        CHECK(dispose(handle));
+    }
+
+    /* A SYN-ACK already received in time must not age while its ACK waits for ARP. */
+    config.arp_cache_ttl_ms = 1000U;
+    handle = TCP_INVALID_HANDLE;
+    CHECK(initialize(&config));
+    CHECK(net_arp_cache_store(&net_global_context, &local_peer.address, &peer_mac) == 0);
+    network_test_backend_clock_advance(200U);
+    CHECK(tcp_connect(&handle, &local_peer, 0, 0U) == TCP_ERR_WOULD_BLOCK);
+    network_test_backend_clock_advance(800U);
+    syn_ack = (struct control){22U, open->local_port, 19U, open->iss + 1U, 0x12U, 128U, 0U};
+    CHECK(queue_control(&local_peer, &peer_mac, syn_ack) && net_poll(0U) == 1);
+    CHECK(open->ack_pending && net_poll(0U) == 1);
+    network_test_backend_clock_advance(201U);
+    arp_reply(frame, &refreshed_mac);
+    CHECK(network_test_backend_queue_receive(frame, sizeof(frame)) == 0);
+    CHECK(net_poll(0U) == 1 && net_poll(0U) == 1);
+    CHECK(status_is(handle, TCP_STATE_ESTABLISHED, 0));
+    CHECK(open->syn_transmissions == 1U &&
+          tcp_global_context.connection.stream.rto.wait_ms == 1000U);
+    return dispose(handle);
 }
 
 static int test_ack_commit_budget(void)
@@ -693,7 +740,8 @@ int test_tcp_active_open(void)
 {
     if (!test_hmac() || !test_preflight_failures() || !test_handshake() ||
         !test_clock_and_generation() || !test_loss_and_neighbor_refresh() ||
-        !test_handshake_during_refresh() || !test_ack_commit_budget() ||
+        !test_handshake_during_refresh() || !test_syn_rto_receive_boundary() ||
+        !test_ack_commit_budget() ||
         !test_local_failure_during_other_protocol() || !test_receive_recovery() ||
         !test_terminal_paths()) {
         return 0;

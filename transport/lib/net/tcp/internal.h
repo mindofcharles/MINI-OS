@@ -3,6 +3,7 @@
 
 #include "../tcp.h"
 #include "../service.h"
+#include "rto.h"
 
 enum {
     TCP_INSTANCE_SECRET_BYTES = 32,
@@ -20,9 +21,11 @@ struct tcp_active_open {
     net_u16 peer_mss;
     net_u16 peer_window;
     net_u8 ack_pending;
+    net_u8 short_syn_timeout;
 };
 
 struct tcp_stream {
+    struct tcp_rto rto;
     net_u32 snd_una;
     net_u32 rcv_nxt;
     net_u32 rcv_right; /* Exclusive right edge last sent on the wire. */
@@ -50,7 +53,7 @@ struct tcp_connection {
     int terminal_result;
     net_u32 started_ms;
     net_u32 close_started_ms;
-    net_u32 transmit_started_ms;
+    net_u32 transmit_started_ms; /* Start of the current nonempty, no-ACK interval. */
     unsigned int tx_head;
     unsigned int tx_length;
     unsigned int tx_outstanding; /* Sent bytes at the front of tx_queue. */
@@ -75,6 +78,7 @@ struct tcp_context {
 extern struct tcp_context tcp_global_context;
 
 struct tcp_segment_view;
+struct net_tx_deadline;
 
 int tcp_config_validate(const struct tcp_config *config);
 int tcp_endpoint_validate(const struct tcp_endpoint *endpoint);
@@ -99,7 +103,7 @@ int tcp_resolve_neighbor(const struct tcp_connection *connection,
                          struct net_mac_addr *mac);
 int tcp_transmit(const struct tcp_connection *connection,
                  const struct net_mac_addr *mac, struct tcp_segment_view *segment,
-                 unsigned int tx_offset);
+                 unsigned int tx_offset, const struct net_tx_deadline *deadline);
 
 int tcp_open_prepare(const struct tcp_endpoint *endpoint, net_u32 now_ms,
                       struct tcp_active_open *open);
@@ -109,14 +113,18 @@ int tcp_open_timer(struct tcp_connection *connection, net_u32 now_ms);
 int tcp_open_input(struct tcp_connection *connection,
                     const struct tcp_segment_view *segment);
 void tcp_stream_start(struct tcp_connection *connection);
-int tcp_stream_output(struct tcp_connection *connection);
+int tcp_stream_transmit_expired(const struct tcp_connection *connection,
+                                 net_u32 now_ms);
+int tcp_stream_output(struct tcp_connection *connection, net_u32 now_ms);
+int tcp_stream_after_receive(const struct tcp_connection *connection);
 int tcp_stream_input(struct tcp_connection *connection,
                       const struct tcp_segment_view *segment);
 unsigned int tcp_stream_write(struct tcp_connection *connection,
-                               const void *data, unsigned int length);
+                               const void *data, unsigned int length, net_u32 now_ms);
 unsigned int tcp_stream_read(struct tcp_connection *connection,
                               void *data, unsigned int capacity);
 int tcp_connection_timer(void *owner, net_u32 now_ms);
+int tcp_connection_after_receive(void *owner);
 int tcp_connection_input(void *owner,
                           const struct net_ethernet_view *ethernet,
                           const struct net_ipv4_view *packet);

@@ -35,6 +35,7 @@ int net_ipv4_handle(struct net_context *context,
 int net_ipv4_send(struct net_context *context,
                   const struct net_ipv4_addr *destination,
                   const struct net_mac_addr *next_hop_mac,
-                  net_u8 protocol, unsigned int payload_length);
+                  net_u8 protocol, unsigned int payload_length,
+                  const struct net_tx_deadline *deadline);
 
 #endif

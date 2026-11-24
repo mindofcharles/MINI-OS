@@ -8,7 +8,7 @@ Protocol parsing, packet construction, timers, and bounded state are modern C un
 
 The supported protocol subset is Ethernet II, Ethernet/IPv4 ARP, static-address unfragmented IPv4, ICMP Echo, and one actively opened IPv4 TCP connection with bounded bidirectional byte streams.
 
-TCP data retransmission, congestion control, zero-window probing by the sender, passive open, and wire-level shutdown are not implemented. The stream implementation does not yet recover from dropped data or window updates.
+TCP can recover from dropped data or acknowledgments within a bounded retry and transmit budget. Congestion control, sender zero-window probing and recovery from a lost window-reopening update, passive open, and wire-level shutdown are not implemented.
 
 UDP, DHCP, DNS, SSH, IPv4 options, fragment reassembly, and ICMP error processing are not implemented.
 
@@ -68,7 +68,7 @@ While the connection is pending, a zero-wait call gives it one service opportuni
 
 Generations never wrap or restart within an application instance, and exhaustion has a distinct error instead of reusing an old handle.
 
-The default 120,000 ms connection budget starts at the first call and includes setup, ARP, and the handshake. The 300,000 ms close-grace and pending-transmit settings are reserved for the corresponding wire-level features. Configured durations are positive and at most `0x7FFFFFFF` milliseconds.
+The default 120,000 ms connection budget starts at the first call and includes setup, ARP, and the handshake. The 300,000 ms close-grace setting remains reserved for wire-level close. Configured durations are positive and at most `0x7FFFFFFF` milliseconds.
 
 A matching refusal, cancellation, device failure, exhausted neighbor retries, exhausted SYN retries, and expiry of the connection budget are observable through `tcp_status` until the terminal record is released.
 
@@ -98,6 +98,24 @@ An established connection accepts a reset at its next expected receive sequence.
 
 The stream does not consume FIN or report wire-level EOF yet. An accepted reset or other terminal failure remains visible through the handle, including when an I/O call already returned a positive byte count.
 
+## TCP data retransmission
+
+The data retransmission timeout (RTO) starts at 1,000 ms, or 3,000 ms if a shorter SYN timer expired while waiting for the SYN-ACK. The fallback applies even if ARP delayed the SYN retry and the SYN-ACK arrived before another SYN went on the wire. Waiting for ARP to send the final ACK after a timely SYN-ACK is not a SYN timeout.
+
+The sender times the oldest unacknowledged range and retains its bytes in the transmit ring. Successful transmissions start or back off the timer, and an ACK that advances the cumulative sequence restarts it if bytes remain in flight. New sends while the timer is running do not postpone the older bytes. The timer's recorded sequence boundary excludes bytes first sent after it was armed.
+
+A retry uses the original sequence numbers and only bytes inside the peer's current receive window. It reads the current range after ARP refresh, without retaining a prepared packet. A blocked or deferred send does not spend a retry, and a successful retry does not add to the flight size. Timeout retries double the RTO up to 60 seconds.
+
+After five retries without cumulative ACK progress, the next eligible expiry allows the normal single input opportunity before reporting `TCP_ERR_RETRIES`. An advancing ACK or a valid window closure can make that expiry inapplicable. A duplicate ACK that leaves the window open does not postpone failure or grant another receive opportunity.
+
+Fresh data with an unambiguous acknowledgment updates the RTT estimate. ACKs after a retransmission do not supply an ambiguous sample. The calculated RTO is bounded to 1–60 seconds. See [RFC 6298](https://www.rfc-editor.org/rfc/rfc6298.html#section-2).
+
+The independent `transmit_timeout_ms` limit defaults to 300,000 ms. It runs while the transmit queue is nonempty, including when no bytes have reached the wire. Only cumulative ACK progress restarts it while bytes remain; a drained queue disarms it. A caller timeout, another application write, a duplicate ACK, or a window-only update cannot restart it. Expiry is retained as `TCP_ERR_TRANSMIT_TIMEOUT`.
+
+Before starting a raw TCP transmit, the Ethernet layer checks both the no-progress deadline and any positive caller wait against the same clock reading. The no-progress deadline also applies to zero-wait calls, and an ACK processed at or after that deadline cannot revive the connection.
+
+No ordinary retries run against a closed peer receive window. Until sender probing is implemented, the connection needs a valid reopening update to resume in that case, and the independent no-progress limit still applies.
+
 ## Internal ownership and resource bounds
 
 The shared service step provides bounded receive, timer, cancellation, and packet dispatch under one reentrancy guard without an unconditional TCP reference in the IPv4 object group.
@@ -109,6 +127,8 @@ Synchronous resolution and Ping also finish their task when startup crosses the 
 Stale generations cannot start or finish another connection's task, and cache expiry and re-resolution use the existing bounded ARP policy rather than a permanently cached neighbor MAC.
 
 After connection, sendable data and pending ACKs can share a fresh next-hop lookup while receive and cancellation continue. Repeated requests do not restart an unresolved lookup's 120,000 ms budget. ARP attempt exhaustion can end it sooner. A resolved lookup is complete even if the call deadline defers the transmit. Resolution timeout for ordinary output is retained as `TCP_ERR_NEIGHBOR_TIMEOUT`. If only a reset challenge needs the result, resolution timeout abandons the challenge without terminating the connection.
+
+A valid pure ACK releases an owned lookup immediately if there is no longer any data or acknowledgment ready to send. If a retry becomes due later, it can start a new lookup.
 
 If a stream wait expires before sending an ARP or ICMP reply, the shared service can defer that request using the existing receive frame. It sends and counts the reply work on a later service opportunity without allocating another frame.
 
@@ -132,9 +152,9 @@ This is not an implemented target idle/wakeup path, and the deterministic backen
 
 It checks the TCP lifecycle foundation and uses independent wire vectors for the codec, including the IPv4 receive and transmit-buffer paths.
 
-`make test-network-tcp` runs the TCP host suite normally and with AddressSanitizer and UndefinedBehaviorSanitizer, compiles the target TCP objects, and builds the strict-C90 guest probe. It covers the handshake, both rings wrapping, partial ACKs, large binary streams, receive-window closure and reopening, neighbor refresh, and terminal causes.
+`make test-network-tcp` runs the TCP host suite normally and with AddressSanitizer and UndefinedBehaviorSanitizer, compiles the target TCP objects, and builds the strict-C90 guest probe. It covers the handshake, ring and sequence wrap, partial ACKs, large binary streams, closure and reopening of the receive window, retransmission timing, neighbor refresh, and terminal causes.
 
-`make test-network-tcp-qemu` verifies handshake retransmission, lost final ACK recovery, refusal, and the no-entropy path through QEMU's NE2000 device. A controlled Ethernet peer and the guest also check exact streams of 7,351 and 7,129 bytes in opposite directions, using different ingress and egress MAC addresses. The test checks an i386 HMAC known-answer vector, repeated application runs, guarded shell return, and image integrity.
+`make test-network-tcp-qemu` verifies handshake retransmission, lost final ACK recovery, refusal, and the no-entropy path through QEMU's NE2000 device. A controlled Ethernet peer and the guest also check exact streams of 7,351 and 7,129 bytes in opposite directions. A separate run drops the first data segment and requires the same sequence and bytes before acknowledging the retry. The test also checks gateway routing, an i386 HMAC known-answer vector, repeated application runs, guarded shell return, and image integrity.
 
 `make test-network-d6` boots temporary debug images and tests exact ARP and ICMP wire packets through QEMU's NE2000 model against a controlled Ethernet peer, including cache reuse and expiry, malformed-packet rejection, inbound replies, bounded timeout, and keyboard cancellation.
 

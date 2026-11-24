@@ -183,6 +183,40 @@ static int check_stream(const struct tcp_config *config)
     return 0;
 }
 
+static int check_retransmission(const struct tcp_config *config)
+{
+    static const unsigned char data[] = {0x45U, 0U, 0x35U, 0x61U, 0xffU, 0x0dU,
+                                         0U, 0x80U, 0x42U};
+    tcp_handle handle = TCP_INVALID_HANDLE;
+    struct tcp_status status;
+    unsigned char byte = 0xa5U;
+    unsigned int started;
+    int result;
+
+    result = tcp_connect(&handle, &routed_endpoint, config, 10000U);
+    if (result != 0) {
+        printf("E5a TCP retransmit connect: %d\n", result);
+        return 0;
+    }
+    if (tcp_send(handle, data, sizeof(data), 0U) != (int)sizeof(data) ||
+        tcp_recv(handle, &byte, 1U, 50U) != NET_ERR_TIMEOUT || byte != 0xa5U) {
+        printf("E5a TCP retransmit initial send or caller timeout failed\n");
+        return 0;
+    }
+    started = net_clock_now_ms();
+    while (!net_timeout_expired(started, net_clock_now_ms(), 10000U)) {
+        if (net_poll(100U) < 0 || tcp_status(handle, &status) != 0 ||
+            status.state != TCP_STATE_ESTABLISHED) {
+            break;
+        }
+        if (status.writable_bytes == TCP_QUEUE_CAPACITY && status.readable_bytes == 0U) {
+            return tcp_abort(handle) == 0 && tcp_release(handle) == 0 && check_disabled();
+        }
+    }
+    printf("E5a TCP retransmit did not drain the transmit queue\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     struct tcp_config config;
@@ -199,6 +233,10 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "stream") == 0) {
         success = check_stream(&config);
         printf("E4 TCP stream: %s\n", success ? "PASS" : "FAIL");
+        return success ? 0 : 1;
+    } else if (strcmp(argv[1], "retransmit") == 0) {
+        success = check_retransmission(&config);
+        printf("E5a TCP retransmit: %s\n", success ? "PASS" : "FAIL");
         return success ? 0 : 1;
     } else if (strcmp(argv[1], "open") == 0 || strcmp(argv[1], "routed") == 0 ||
                strcmp(argv[1], "refuse") == 0) {

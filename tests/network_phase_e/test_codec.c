@@ -499,7 +499,7 @@ static int test_ipv4_codec_path(void)
                                 &local_ip, &peer_ip, &segment);
     CHECK(length == (int)sizeof(odd_wire));
     CHECK(net_ipv4_send(context, &peer_ip, &peer_mac, NET_IPV4_PROTOCOL_TCP,
-                        (unsigned int)length) == 0);
+                        (unsigned int)length, 0) == 0);
 
     /* Reverse the address and port pairs in the independent receive vector. */
     memcpy(frame, peer_mac.octets, 6U);

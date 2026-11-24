@@ -288,4 +288,16 @@ The reset cases check exact, in-window, and out-of-window sequence numbers, incl
 
 The QEMU peer checks a routed full-duplex exchange with an independent packet builder. The guest verifies 7,129 bytes from the peer, starting with a one-byte read, and the peer verifies 7,351 bytes from the guest. Both streams contain zero bytes and exceed the entire queue capacity. The peer checks sequence and acknowledgment positions, window credit, and checksums without relying on the guest's segment boundaries.
 
-The clean build regression runs the QEMU probe against images produced with both `ld.lld` and `elf2bin`. This tests the current stream path, not loss recovery or wire-level shutdown.
+## TCP Data Retransmission Validation
+
+The fake clock checks the RTT estimator, the RTO floor and ceiling, ambiguity after retransmission, SYN timeout fallback, and the exact backoff and retry limit across clock wrap. Independent frames check that partial ACKs move the retransmission prefix, recent bytes are not retransmitted early, and deferred transmissions and ARP refresh do not consume retries.
+
+At retry exhaustion, the host test queues a valid advancing ACK or a window closure before the final expiry and checks that the connection stays live. With no frame or a non-advancing ACK that leaves the window open, the same poll reports retry exhaustion without taking a second frame. A simultaneous no-progress deadline still takes precedence over an advancing ACK.
+
+The host suite also separates a caller timeout from a retained transmit timeout. It checks progress before and after the no-progress deadline, waiting for the first ARP resolution, and a closed peer receive window that does not spend ordinary retries.
+
+Zero and positive wait cases permit a raw send one tick before the no-progress deadline and prevent it at the exact deadline, while still returning already copied bytes. Partial and complete ACKs that make a retry wait unnecessary release ARP in the same service step, letting an unrelated cached resolution succeed before the next poll.
+
+The QEMU peer drops the first copy of a short routed binary segment and verifies the complete retransmitted frame before it acknowledges the bytes. The strict-C90 guest confirms that a shorter call timeout did not end the connection and that the cumulative ACK drains the transmit queue.
+
+The clean build regression runs the QEMU probe against images produced with both `ld.lld` and `elf2bin`. This covers the current data retry path, not sender zero-window probing or wire-level shutdown.

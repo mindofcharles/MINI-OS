@@ -84,9 +84,10 @@ unsigned char *net_ethernet_begin_tx(struct net_context *context)
     return context->tx_frame + NET_ETHERNET_HEADER_SIZE;
 }
 
-int net_ethernet_send(struct net_context *context,
-                      const struct net_mac_addr *destination,
-                      net_u16 ethertype, unsigned int payload_length)
+int net_ethernet_send_before(struct net_context *context,
+                             const struct net_mac_addr *destination,
+                             net_u16 ethertype, unsigned int payload_length,
+                             const struct net_tx_deadline *deadline)
 {
     struct net_mac_addr target;
     unsigned int logical_length;
@@ -123,8 +124,16 @@ int net_ethernet_send(struct net_context *context,
     }
 
     context->tx_prepared = 0;
-    if (net_service_io_expired(context)) {
-        return NET_ETHERNET_TX_DEFERRED;
+    if (deadline != 0 || context->io_wait_ms != 0U) {
+        net_u32 now_ms = net_clock_now_ms();
+
+        if (deadline != 0 &&
+            net_timeout_expired(deadline->started_ms, now_ms, deadline->timeout_ms)) {
+            return NET_ETHERNET_TX_EXPIRED;
+        }
+        if (net_service_io_expired_at(context, now_ms)) {
+            return NET_ETHERNET_TX_DEFERRED;
+        }
     }
     result = net_send_frame(context->tx_frame, wire_length);
     if (result == (int)wire_length) {
@@ -134,4 +143,12 @@ int net_ethernet_send(struct net_context *context,
         return NET_ERR_UNAVAILABLE;
     }
     return NET_ERR_DEVICE;
+}
+
+int net_ethernet_send(struct net_context *context,
+                      const struct net_mac_addr *destination,
+                      net_u16 ethertype, unsigned int payload_length)
+{
+    return net_ethernet_send_before(context, destination, ethertype,
+                                    payload_length, 0);
 }

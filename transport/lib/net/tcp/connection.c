@@ -55,9 +55,12 @@ int tcp_connection_allocate(const struct tcp_endpoint *endpoint,
                               net_u32 now_ms, tcp_handle *handle)
 {
     struct net_transport_binding binding = {
-        tcp_connection_input, tcp_connection_timer,
-        tcp_connection_service_failure, &tcp_global_context,
-        NET_IPV4_PROTOCOL_TCP, 0U
+        .input = tcp_connection_input,
+        .timer = tcp_connection_timer,
+        .after_receive = tcp_connection_after_receive,
+        .failure = tcp_connection_service_failure,
+        .owner = &tcp_global_context,
+        .protocol = NET_IPV4_PROTOCOL_TCP
     };
     int result;
 
@@ -88,6 +91,7 @@ int tcp_connection_allocate(const struct tcp_endpoint *endpoint,
                net_global_context.transport.protocol != binding.protocol ||
                net_global_context.transport.input != binding.input ||
                net_global_context.transport.timer != binding.timer ||
+               net_global_context.transport.after_receive != binding.after_receive ||
                net_global_context.transport.failure != binding.failure) {
         return NET_ERR_BUSY;
     }
