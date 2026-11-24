@@ -114,6 +114,10 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
     if (received == SYS_ERR_UNAVAILABLE) {
         return net_service_fail(context, NET_ERR_UNAVAILABLE);
     }
+    /* The raw driver returns these receive errors only after recovery. */
+    if (received == SYS_ERR_OVERRUN || received == SYS_ERR_TIMEOUT) {
+        received = 0;
+    }
     if (received < 0) {
         return net_service_fail(context, NET_ERR_DEVICE);
     }
@@ -131,7 +135,8 @@ int net_service_once(struct net_context *context, net_u32 started_ms,
     if (context->transport.owner == 0 && net_cancel_requested()) {
         return net_service_fail(context, NET_ERR_CANCELLED);
     }
-    if (wait_ms != 0U &&
+    /* An owned transport applies its own protocol deadline to a received frame. */
+    if (wait_ms != 0U && context->transport.arp_owner == NET_ARP_OWNER_SYNC &&
         net_timeout_expired(started_ms, net_clock_now_ms(), wait_ms)) {
         return actions;
     }

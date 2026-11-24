@@ -31,6 +31,7 @@ static unsigned int receive_count;
 static unsigned int fake_clock;
 static unsigned int clock_read_step;
 static unsigned int receive_clock_step;
+static unsigned int send_clock_step;
 static unsigned int fake_random_state;
 static int forced_cancelled;
 static int cancel_once;
@@ -79,6 +80,7 @@ void network_test_backend_reset(void)
     fake_clock = 0U;
     clock_read_step = 0U;
     receive_clock_step = 0U;
+    send_clock_step = 0U;
     fake_random_state = 0x4D494E49U;
     forced_cancelled = 0;
     cancel_once = 0;
@@ -118,6 +120,11 @@ void network_test_backend_set_clock_read_step(unsigned int milliseconds)
 void network_test_backend_set_receive_clock_step(unsigned int milliseconds)
 {
     receive_clock_step = milliseconds;
+}
+
+void network_test_backend_set_send_clock_step(unsigned int milliseconds)
+{
+    send_clock_step = milliseconds;
 }
 
 void network_test_backend_random_seed(unsigned int seed)
@@ -322,6 +329,7 @@ int net_send_frame(const void *frame, unsigned int length)
     int forced_result;
     int forced_result_set;
     unsigned int tail;
+    unsigned int started_ms;
 
     if (frame == 0) {
         return SYS_ERR_INVALID;
@@ -329,6 +337,8 @@ int net_send_frame(const void *frame, unsigned int length)
     if (length < NET_FRAME_MIN || length > NET_FRAME_MAX) {
         return SYS_ERR_RANGE;
     }
+    started_ms = fake_clock;
+    fake_clock += send_clock_step;
     forced_result = next_send_result;
     forced_result_set = next_send_result_set;
     next_send_result = 0;
@@ -342,7 +352,7 @@ int net_send_frame(const void *frame, unsigned int length)
     tail = (transmit_head + transmit_count) % NETWORK_TEST_BACKEND_QUEUE_CAPACITY;
     memcpy(transmitted[tail].data, frame, length);
     transmitted[tail].length = length;
-    transmitted[tail].time_ms = fake_clock;
+    transmitted[tail].time_ms = started_ms;
     ++transmit_count;
     ++total_transmit_count;
     return forced_result_set ? forced_result : (int)length;

@@ -29,16 +29,103 @@ static int lookup(tcp_handle handle, struct tcp_connection **connection)
     return *connection == 0 ? NET_ERR_STATE : 0;
 }
 
+static int connection_result(const struct tcp_connection *connection, int result)
+{
+    return connection->state == TCP_STATE_FAILED ? connection->terminal_result :
+                                                   result;
+}
+
+static int start_connect(tcp_handle *handle, const struct tcp_endpoint *endpoint,
+                         const struct tcp_config *config, net_u32 started_ms)
+{
+    struct tcp_active_open open = {0};
+    int result;
+
+    if (tcp_global_context.last_generation == UINT_MAX) {
+        return TCP_ERR_GENERATION_EXHAUSTED;
+    }
+    if (net_global_context.transport.owner != 0 &&
+        net_global_context.transport.owner != &tcp_global_context) {
+        return NET_ERR_BUSY;
+    }
+    result = net_service_acquire(&net_global_context);
+    if (result != 0) {
+        return result;
+    }
+    result = net_cancel_requested() ? NET_ERR_CANCELLED :
+                                      tcp_open_prepare(endpoint, started_ms, &open);
+    if (result == 0 && net_cancel_requested()) {
+        result = NET_ERR_CANCELLED;
+    }
+    net_service_release(&net_global_context);
+    if (result != 0) {
+        return result;
+    }
+    if (net_timeout_expired(started_ms, net_clock_now_ms(),
+                            config->connect_timeout_ms)) {
+        return TCP_ERR_CONNECT_TIMEOUT;
+    }
+    result = tcp_connection_allocate(endpoint, config, started_ms, handle);
+    if (result == 0) {
+        tcp_global_context.connection.open = open;
+    }
+    return result;
+}
+
+static int wait_connect(struct tcp_connection *connection, net_u32 started_ms,
+                        unsigned int wait_ms)
+{
+    int result = net_service_acquire(&net_global_context);
+
+    if (result != 0) {
+        return result;
+    }
+    for (;;) {
+        net_u32 now = net_clock_now_ms();
+
+        if (net_timeout_expired(connection->started_ms, now,
+                                connection->config.connect_timeout_ms)) {
+            result = tcp_connection_fail(TCP_ERR_CONNECT_TIMEOUT);
+            break;
+        }
+        if (wait_ms != 0U && net_timeout_expired(started_ms, now, wait_ms)) {
+            result = NET_ERR_TIMEOUT;
+            break;
+        }
+        result = connection_result(connection,
+            net_service_once(&net_global_context, started_ms, wait_ms));
+        if (result < 0) {
+            break;
+        }
+        if (connection->state == TCP_STATE_ESTABLISHED) {
+            result = 0;
+            break;
+        }
+        if (wait_ms == 0U) {
+            result = net_timeout_expired(connection->started_ms,
+                                         net_clock_now_ms(),
+                                         connection->config.connect_timeout_ms) ?
+                     tcp_connection_fail(TCP_ERR_CONNECT_TIMEOUT) :
+                     TCP_ERR_WOULD_BLOCK;
+            break;
+        }
+    }
+    net_service_release(&net_global_context);
+    return result;
+}
+
 int tcp_connect(tcp_handle *handle, const struct tcp_endpoint *endpoint,
                  const struct tcp_config *config, unsigned int wait_ms)
 {
     struct tcp_config selected;
     struct tcp_connection *connection;
+    net_u32 started_ms;
     int result;
 
     if (handle == 0 || !net_timeout_valid(wait_ms)) {
         return NET_ERR_INVALID;
     }
+    started_ms = net_clock_now_ms();
     if (config == 0) {
         (void)tcp_config_defaults(&selected);
     } else {
@@ -73,13 +160,25 @@ int tcp_connect(tcp_handle *handle, const struct tcp_endpoint *endpoint,
             connection->config.transmit_timeout_ms != selected.transmit_timeout_ms) {
             return NET_ERR_INVALID;
         }
-    } else if (tcp_global_context.connection.handle != TCP_INVALID_HANDLE ||
-               net_global_context.pending_arp.active ||
-               net_global_context.pending_echo.active) {
-        return NET_ERR_BUSY;
+        if (connection->state == TCP_STATE_ESTABLISHED) {
+            return 0;
+        }
+        if (connection->state != TCP_STATE_CONNECTING) {
+            return TCP_ERR_CLOSED;
+        }
+    } else {
+        if (tcp_global_context.connection.handle != TCP_INVALID_HANDLE ||
+            net_global_context.pending_arp.active ||
+            net_global_context.pending_echo.active) {
+            return NET_ERR_BUSY;
+        }
+        result = start_connect(handle, endpoint, &selected, started_ms);
+        if (result != 0) {
+            return result;
+        }
+        connection = &tcp_global_context.connection;
     }
-    /* Active open is deliberately gated until codec, entropy and SYN exist. */
-    return TCP_ERR_UNSUPPORTED;
+    return wait_connect(connection, started_ms, wait_ms);
 }
 
 int tcp_send(tcp_handle handle, const void *data, unsigned int length,
@@ -125,6 +224,9 @@ int tcp_recv(tcp_handle handle, void *data, unsigned int capacity,
     }
     if (connection->state == TCP_STATE_CLOSED) {
         return 0;
+    }
+    if (connection->state == TCP_STATE_CONNECTING) {
+        return TCP_ERR_WOULD_BLOCK;
     }
     return TCP_ERR_UNSUPPORTED;
 }
@@ -174,8 +276,13 @@ int tcp_shutdown_write(tcp_handle handle)
     if (result != 0) {
         return result;
     }
+    if (connection->open.local_port != 0U) {
+        return connection->state == TCP_STATE_CONNECTING ? NET_ERR_STATE :
+                                                          TCP_ERR_UNSUPPORTED;
+    }
     now = net_clock_now_ms();
-    result = tcp_connection_timer(&tcp_global_context, now);
+    result = connection_result(connection,
+        tcp_connection_timer(&tcp_global_context, now));
     return result < 0 ? result : tcp_connection_begin_close(now);
 }
 
@@ -196,12 +303,17 @@ int tcp_close(tcp_handle handle, unsigned int wait_ms)
         connection->state == TCP_STATE_CLOSED) {
         return connection->terminal_result;
     }
+    if (connection->open.local_port != 0U) {
+        return connection->state == TCP_STATE_CONNECTING ? NET_ERR_STATE :
+                                                          TCP_ERR_UNSUPPORTED;
+    }
     started_ms = net_clock_now_ms();
     result = net_service_acquire(&net_global_context);
     if (result != 0) {
         return result;
     }
-    result = tcp_connection_timer(&tcp_global_context, started_ms);
+    result = connection_result(connection,
+        tcp_connection_timer(&tcp_global_context, started_ms));
     if (result < 0) {
         goto done;
     }
@@ -218,11 +330,13 @@ int tcp_close(tcp_handle handle, unsigned int wait_ms)
         goto done;
     }
     for (;;) {
-        result = net_service_once(&net_global_context, started_ms, wait_ms);
+        result = connection_result(connection,
+            net_service_once(&net_global_context, started_ms, wait_ms));
         if (result < 0) {
             goto done;
         }
-        result = tcp_connection_timer(&tcp_global_context, net_clock_now_ms());
+        result = connection_result(connection,
+            tcp_connection_timer(&tcp_global_context, net_clock_now_ms()));
         if (result < 0) {
             goto done;
         }

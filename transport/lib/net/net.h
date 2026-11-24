@@ -59,7 +59,11 @@ int net_ipv4_parse(const char *text, struct net_ipv4_addr *address);
 /* Validates and copies a static configuration into the single stack once. */
 int net_init(const struct net_config *config);
 
-/* Returns a positive action count, zero for no work, or a net_error value. */
+/*
+ * Returns a positive action count, zero for no work, or a net_error value.
+ * A transport's connection-local failure counts as work. Its cause belongs
+ * to the connection and does not replace a shared network result.
+ */
 int net_poll(unsigned int timeout_ms);
 
 /* Resolves one on-link address within one unchanged overall deadline. */

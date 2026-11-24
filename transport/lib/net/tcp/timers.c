@@ -19,12 +19,16 @@ int tcp_connection_timer(void *owner, net_u32 now_ms)
     if (connection->close_started &&
         net_timeout_expired(connection->close_started_ms, now_ms,
                             connection->config.close_grace_ms)) {
-        return tcp_connection_fail(TCP_ERR_CLOSE_TIMEOUT);
+        return tcp_connection_fail_event(TCP_ERR_CLOSE_TIMEOUT);
     }
     if (connection->state == TCP_STATE_CONNECTING &&
         net_timeout_expired(connection->started_ms, now_ms,
                             connection->config.connect_timeout_ms)) {
-        return tcp_connection_fail(TCP_ERR_CONNECT_TIMEOUT);
+        return tcp_connection_fail_event(TCP_ERR_CONNECT_TIMEOUT);
+    }
+    if (connection->state == TCP_STATE_CONNECTING ||
+        connection->state == TCP_STATE_ESTABLISHED) {
+        return tcp_open_timer(connection, now_ms);
     }
     return 0;
 }

@@ -6,8 +6,8 @@ Network-library implementations compile as modern C with fatal project warnings,
 
 - The base group contains `raw.c`, `platform.c`, and `time.c` and is selected by raw-frame and higher-level network consumers.
 - The IPv4 group contains initialization, address, byte-order, checksum, Ethernet, ARP, IPv4, ICMP, shared service, and polling code and is selected by `ping`, TCP consumers, and protocol probes.
-- The TCP group contains `tcp/api.c`, `tcp/connection.c`, `tcp/timers.c`, `tcp/codec.c`, and `tcp/sequence.c` and is selected only by named TCP consumers and `test_tcp_contract`.
-- The shared crypto group currently contains only `../crypto/clear.c` and is selected with TCP, without importing SSH or a hash/HMAC implementation.
+- The TCP group contains the interface and connection state, timers, segment codec, sequence arithmetic, ISN generation, and active-open state machine under `tcp/`. It is selected only by named TCP consumers and `test_tcp_contract`.
+- The shared crypto group links secure clearing and the HMAC-SHA256 wrapper and pinned implementation with TCP.
 
 The build rejects every source under the network and shared crypto directories that has no group, belongs to more than one group, or is named by a group but absent from the tree.
 
@@ -29,11 +29,15 @@ The shared service loop rejects reentrancy and dispatches validated unfragmented
 
 ARP learning remains unauthenticated, and options, fragment reassembly, ICMP errors, and an idle-shell Echo server are not implemented.
 
-## TCP foundation
+## TCP active open
 
 `tcp.h` fixes C90 signatures, error values, configuration defaults, one generation-checked slot, status snapshots, explicit terminal-handle release, and final application-instance teardown.
 
-The public active-open operation currently returns `TCP_ERR_UNSUPPORTED` without allocating a handle, using entropy, starting ARP, or emitting a SYN, and no public stream operation transfers bytes.
+`tcp_connect` uses production entropy and a keyed ISN before publishing a handle. It can resume through ARP and the three-way handshake with repeated calls or `net_poll`.
+
+One attempt keeps its original connection deadline and SYN retry history across caller waits. Successful transmission of the final ACK commits the handshake. A matching refusal or exhausted protocol budget becomes a retained terminal result and counts as polling work without interrupting other protocols.
+
+The active open advertises a zero receive window and answers peer probes without accepting a byte. The public stream and graceful wire-close operations are unsupported on an established connection.
 
 Private lifecycle helpers retain terminal errors after partial-progress reporting, separate call waits from a once-captured close-grace deadline, reject unread-data loss, and prevent old handles from reaching a new generation.
 
@@ -55,4 +59,4 @@ The encoder supports the fixed TCP header and an optional SYN MSS. It can use pa
 
 `tcp/sequence.h` exposes modular comparison and half-open range checks for 32-bit TCP sequence numbers.
 
-The registered TCP callback classifies segments and updates counters. The public contract probe continues to expect `TCP_ERR_UNSUPPORTED` from a new active-open request.
+The registered TCP callback processes segments that match the connection tuple. It sends the final ACK again if the peer repeats the accepted SYN-ACK. Control packets use the resolved configured next hop, and one pending ACK can wait across poll calls for the owned ARP refresh.

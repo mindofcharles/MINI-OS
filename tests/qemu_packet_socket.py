@@ -13,6 +13,30 @@ FRAME_MIN = 60
 FRAME_MAX = 1514
 
 
+def checksum(data: bytes) -> int:
+    if len(data) & 1:
+        data += b"\x00"
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    while total > 0xFFFF:
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def ethernet(destination: bytes, source: bytes, kind: int,
+             payload: bytes, padding: int = 0) -> bytes:
+    frame = destination + source + struct.pack("!H", kind) + payload
+    return frame.ljust(FRAME_MIN, bytes((padding,)))
+
+
+def arp_frame(operation: int, destination: bytes, source: bytes,
+              sender_ip: bytes, target_mac: bytes, target_ip: bytes,
+              sender_mac: Optional[bytes] = None) -> bytes:
+    sender = source if sender_mac is None else sender_mac
+    payload = struct.pack("!HHBBH", 1, 0x0800, 6, 4, operation)
+    payload += sender + sender_ip + target_mac + target_ip
+    return ethernet(destination, source, 0x0806, payload)
+
+
 def reserve_port() -> int:
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -61,12 +85,13 @@ def send_frame(peer: socket.socket, frame: bytes) -> None:
     peer.sendall(struct.pack("!I", len(frame)) + frame)
 
 
-def network_args(port: int, capture: Path, io_base: int = 0x300) -> list[str]:
+def network_args(port: int, capture: Path, io_base: int = 0x300,
+                 *, cpu: str = "max,rdrand=on") -> list[str]:
     return [
         "-accel",
         "tcg",
         "-cpu",
-        "max,rdrand=on",
+        cpu,
         "-netdev",
         f"socket,id=net0,listen=127.0.0.1:{port}",
         "-device",

@@ -57,7 +57,7 @@ static int all_zero(const void *data, unsigned int length)
     return 1;
 }
 
-static int test_public_gate(void)
+static int test_public_validation(void)
 {
     struct tcp_config config;
     struct tcp_endpoint changed = endpoint;
@@ -72,11 +72,6 @@ static int test_public_gate(void)
     CHECK(tcp_config_defaults(0) == NET_ERR_INVALID);
     CHECK(tcp_config_defaults(&config) == 0);
     CHECK(config.close_grace_ms > 240000U);
-    CHECK(tcp_connect(&handle, &endpoint, 0, 0U) == TCP_ERR_UNSUPPORTED);
-    CHECK(handle == TCP_INVALID_HANDLE && !net_global_context.pending_arp.active);
-    CHECK(net_global_context.transport.owner == 0);
-    CHECK(network_test_backend_transmit_count() == 0U);
-    CHECK(network_test_backend_random_call_count() == 0U);
     CHECK(tcp_connect(0, &endpoint, 0, 0U) == NET_ERR_INVALID);
     CHECK(tcp_connect(&handle, 0, 0, 0U) == NET_ERR_INVALID);
     CHECK(tcp_connect(&handle, &endpoint, 0, 0x80000000U) == NET_ERR_INVALID);
@@ -95,6 +90,10 @@ static int test_public_gate(void)
     CHECK(tcp_config_defaults(&config) == 0);
     config.transmit_timeout_ms = 0U;
     CHECK(tcp_connect(&handle, &endpoint, &config, 0U) == NET_ERR_INVALID);
+    CHECK(handle == TCP_INVALID_HANDLE && !net_global_context.pending_arp.active);
+    CHECK(net_global_context.transport.owner == 0);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(network_test_backend_random_call_count() == 0U);
     CHECK(tcp_recv(handle, &byte, 0U, 0U) == NET_ERR_INVALID);
     CHECK(tcp_send(handle, 0, 1U, 0U) == NET_ERR_INVALID);
     CHECK(tcp_send(handle, &byte, 1U, 0U) == NET_ERR_STATE);
@@ -116,8 +115,8 @@ static int test_terminal_records(void)
     static const int reasons[] = {
         TCP_ERR_REFUSED, TCP_ERR_RESET, TCP_ERR_RETRIES, TCP_ERR_NO_MEMORY,
         TCP_ERR_CLOSE_TIMEOUT, TCP_ERR_CONNECT_TIMEOUT,
-        TCP_ERR_TRANSMIT_TIMEOUT, NET_ERR_DEVICE, NET_ERR_UNAVAILABLE,
-        NET_ERR_CANCELLED
+        TCP_ERR_TRANSMIT_TIMEOUT, TCP_ERR_NEIGHBOR_TIMEOUT,
+        NET_ERR_DEVICE, NET_ERR_UNAVAILABLE, NET_ERR_CANCELLED
     };
     unsigned int index;
 
@@ -265,7 +264,7 @@ static int test_close_contract(void)
     connection = &tcp_global_context.connection;
     connection->config.connect_timeout_ms = 5U;
     CHECK(tcp_connect(&handle, &endpoint, &connection->config, 0U) ==
-          TCP_ERR_UNSUPPORTED);
+          TCP_ERR_WOULD_BLOCK);
     CHECK(connection->started_ms == 0U);
     {
         struct tcp_endpoint changed_endpoint = endpoint;
@@ -279,7 +278,7 @@ static int test_close_contract(void)
         CHECK(connection->started_ms == 0U && connection->handle == handle);
     }
     network_test_backend_clock_advance(5U);
-    CHECK(net_poll(0U) == TCP_ERR_CONNECT_TIMEOUT);
+    CHECK(net_poll(0U) == 1);
     CHECK(tcp_recv(handle, &byte, 1U, 0U) == TCP_ERR_CONNECT_TIMEOUT);
     CHECK(tcp_abort(handle) == 0 && tcp_release(handle) == 0);
     return 1;
@@ -720,15 +719,16 @@ static int test_backend_extensions(void)
 }
 
 int test_tcp_codec(void);
+int test_tcp_active_open(void);
 
 int main(void)
 {
-    if (!test_public_gate() || !test_terminal_records() || !test_close_contract() ||
+    if (!test_public_validation() || !test_terminal_records() || !test_close_contract() ||
         !test_arp_start_deadline_cleanup() || !test_neighbor_tasks() ||
         !test_transport_binding() ||
         !test_poll_error_after_prefix() || !test_shared_operation_failure() ||
         !test_backend_extensions()) return 1;
     puts("E1 TCP foundation, owned ARP, service and backend tests: PASS");
     puts("Private lifecycle fixtures are not TCP wire interoperability evidence.");
-    return test_tcp_codec() ? 0 : 1;
+    return test_tcp_codec() && test_tcp_active_open() ? 0 : 1;
 }

@@ -27,7 +27,7 @@ The implemented path is end-to-end:
 - Filesystem design idea draft: `docs/DIY-FS.md`
 - System call ABI: `docs/Syscall_ABI.md`
 - Raw Ethernet transport: `docs/Network_Raw_Transport.md`
-- Ethernet, ARP, IPv4, and ICMP Echo: `docs/Network_Stack.md`
+- Ethernet, ARP, IPv4, ICMP Echo, and TCP active open: `docs/Network_Stack.md`
 - Runtime support matrix: `docs/Library_Support.md`
 - Automated tests: `docs/Testing.md`
 - Real hardware guide: `docs/Real_Hardware_Guide.md`

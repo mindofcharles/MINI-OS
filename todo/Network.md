@@ -1,6 +1,6 @@
 # Network
 
-Phase 0 and Phases A through D are complete. Phase E1 delivered the TCP foundation and E2 added the segment codec and sequence helpers. E3 is next.
+Phase 0 through Phase D are complete. E1 through E3 cover the TCP foundation, segment codec, and secure active open. E4 is next.
 
 - Phase 0: select and measure the SSH and cryptographic libraries. Complete.
 
@@ -12,7 +12,7 @@ Phase 0 and Phases A through D are complete. Phase E1 delivered the TCP foundati
 
 - Phase D: implement Ethernet, ARP, static IPv4, and ICMP. D1 through D5 implementation and host tests, plus D6 deterministic and user-network QEMU protocol acceptance, are complete.
 
-- Phase E will deliver one active TCP connection and `netcat`. E1 and E2 are complete. E3 covers secure active open and the first TCP handshake.
+- Phase E will deliver one active TCP connection and `netcat`. The handshake is working. E4 adds bounded bidirectional byte streams.
 
 - Phases F and G: port the selected SSH stack and add a pinned-host remote-command client. Planned.
 

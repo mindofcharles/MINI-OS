@@ -52,7 +52,11 @@ struct net_pending_arp {
 struct net_ethernet_view;
 struct net_ipv4_view;
 
-/* Private, optional protocol binding; copied, never borrowed from a caller. */
+/*
+ * Private optional protocol binding, copied on registration.
+ * Input and timer callbacks report local state changes as positive work.
+ * Negative results are shared network failures, not connection-local errors.
+ */
 struct net_transport_binding {
     int (*input)(void *owner, const struct net_ethernet_view *ethernet,
                  const struct net_ipv4_view *packet);

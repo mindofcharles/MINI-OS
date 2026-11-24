@@ -19,7 +19,8 @@ typedef char tcp_new_errors[
     TCP_ERR_CLOSED == -15 && TCP_ERR_UNREAD == -16 &&
     TCP_ERR_CLOSE_TIMEOUT == -17 && TCP_ERR_ABORTED == -18 &&
     TCP_ERR_GENERATION_EXHAUSTED == -19 && TCP_ERR_CONNECT_TIMEOUT == -20 &&
-    TCP_ERR_TRANSMIT_TIMEOUT == -21 ? 1 : -1
+    TCP_ERR_TRANSMIT_TIMEOUT == -21 && TCP_ERR_ENTROPY == -22 &&
+    TCP_ERR_CRYPTO == -23 && TCP_ERR_NEIGHBOR_TIMEOUT == -24 ? 1 : -1
 ];
 
 int phase_e_header_probe(void)

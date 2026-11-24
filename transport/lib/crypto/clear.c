@@ -1,6 +1,6 @@
 #include "clear.h"
 
-void crypto_clear(void *buffer, unsigned int length)
+void crypto_clear(void *buffer, size_t length)
 {
     volatile unsigned char *bytes = buffer;
 

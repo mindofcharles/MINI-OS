@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import hashlib
 import os
@@ -60,8 +61,8 @@ def run(
 def copy_repository(source: Path, destination: Path) -> None:
     def ignore(directory: str, names: list[str]) -> set[str]:
         ignored = {".git", "build", "local", "__pycache__", ".DS_Store"}
-        if Path(directory).name == "transport":
-            ignored.add("build")
+        if Path(directory) == source:
+            ignored.add("downloads")
         return ignored.intersection(names)
 
     shutil.copytree(source, destination, ignore=ignore)
@@ -1181,7 +1182,8 @@ def verify_per_application_libraries(repo: Path) -> None:
     compiler_runtime.unlink(missing_ok=True)
     for network_object in (repo / "build/transport/lib/net").rglob("*.o"):
         network_object.unlink()
-    for crypto_object in (repo / "build/transport/lib/crypto").glob("*.o"):
+    crypto_directory = repo / "build/transport/lib/crypto"
+    for crypto_object in crypto_directory.rglob("*.o"):
         crypto_object.unlink()
     hello = run(["make", "transport/build/apps/hello.bin"], repo)
     hello_output = hello.stdout + hello.stderr
@@ -1190,7 +1192,7 @@ def verify_per_application_libraries(repo: Path) -> None:
     if compiler_runtime.exists() or any(
         (repo / "build/transport/lib/net").rglob("*.o")
     ) or any(
-        (repo / "build/transport/lib/crypto").glob("*.o")
+        crypto_directory.rglob("*.o")
     ):
         raise RuntimeError("ordinary application built network-only support")
 
@@ -1203,7 +1205,7 @@ def verify_per_application_libraries(repo: Path) -> None:
         or any(source in netdiag_output for source in ipv4_sources)
         or (repo / "build/transport/lib/net/dependency_probe.o").exists()
         or any((repo / "build/transport/lib/net/tcp").glob("*.o"))
-        or any((repo / "build/transport/lib/crypto").glob("*.o"))
+        or any(crypto_directory.rglob("*.o"))
         or any(
             (
                 repo
@@ -1335,7 +1337,7 @@ def verify_per_application_libraries(repo: Path) -> None:
     if (repo / "build/transport/lib/ssh/dependency_probe.o").exists():
         raise RuntimeError("non-SSH network application acquired SSH objects")
     if any((repo / "build/transport/lib/net/tcp").glob("*.o")) or any(
-        (repo / "build/transport/lib/crypto").glob("*.o")
+        crypto_directory.rglob("*.o")
     ):
         raise RuntimeError("ICMP application acquired TCP queues or crypto objects")
 
@@ -1366,8 +1368,13 @@ def verify_per_application_libraries(repo: Path) -> None:
     if not (repo / "build/transport/lib/ssh/dependency_probe.o").is_file():
         raise RuntimeError("SSH application did not acquire its private objects")
     tcp_object = repo / "build/transport/lib/net/tcp/connection.o"
-    crypto_object = repo / "build/transport/lib/crypto/clear.o"
-    if not tcp_object.is_file() or not crypto_object.is_file():
+    crypto_paths = (
+        "clear.o", "hmac_sha256.o", "mbedtls/md.o", "mbedtls/sha256.o",
+        "mbedtls/platform_util.o",
+    )
+    if not tcp_object.is_file() or not all(
+        (crypto_directory / path).is_file() for path in crypto_paths
+    ):
         raise RuntimeError("TCP-selected application did not acquire bounded TCP and crypto objects")
     tcp_symbols = run(["nm", "-S", str(tcp_object)], repo).stdout
     tcp_match = re.search(
@@ -1383,7 +1390,108 @@ def verify_per_application_libraries(repo: Path) -> None:
     ssh_source.unlink()
 
 
+def verify_mbedtls_missing(repo: Path) -> None:
+    tcp_probe = "transport/build/lib_test/test_tcp_contract.bin"
+    run(["make", "MBEDTLS_SOURCE=", "app", "APP=ping.c"], repo)
+    for option in ("MBEDTLS_SOURCE=", "MBEDTLS_SOURCE=missing-mbedtls"):
+        failed = run(["make", option, tcp_probe], repo, expect_success=False)
+        if "Run make deps" not in failed.stderr or "MBEDTLS_SOURCE" not in failed.stderr:
+            raise RuntimeError("missing Mbed TLS did not give an actionable error")
+    if (repo / "downloads").exists():
+        raise RuntimeError("ordinary build tried to prepare the dependency cache")
+
+
+def verify_mbedtls_source_switch(repo: Path, mbedtls_source: Path) -> None:
+    probe = "transport/build/lib_test/test_tcp_contract.bin"
+    spaced = repo / "mbed tls"
+    spaced.symlink_to(mbedtls_source, target_is_directory=True)
+    for path in (spaced, spaced.relative_to(repo)):
+        rejected = run(["make", f"MBEDTLS_SOURCE={path}", probe], repo, expect_success=False)
+        if "MBEDTLS_SOURCE must not contain spaces" not in rejected.stderr:
+            raise RuntimeError("space-containing Mbed TLS path did not fail before expansion")
+
+    alternate = repo / "alternate-mbedtls"
+    alternate.mkdir()
+    for part in ("include", "LICENSE"):
+        (alternate / part).symlink_to(mbedtls_source / part)
+    library = alternate / "library"
+    library.mkdir()
+    marker = b"MINI_OS_MBEDTLS_ALTERNATE_SOURCE_TEST"
+    for original in (mbedtls_source / "library").iterdir():
+        destination = library / original.name
+        if original.name != "md.c":
+            destination.symlink_to(original)
+            continue
+        destination.write_bytes(
+            original.read_bytes() +
+            b'\nconst char mini_os_alternate_source_test[] = "' + marker + b'";\n'
+        )
+        original_stat = original.stat()
+        os.utime(destination, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    host_targets = [
+        "build/network-phase-e/foundation_test",
+        "build/network-phase-e/foundation_sanitizer_test",
+    ]
+    md_rel = "build/transport/lib/crypto/mbedtls/md.o"
+    md = repo / md_rel
+    image = repo / "build/mini_os.img"
+    unrelated = [
+        repo / "transport/build/apps/hello.bin",
+        repo / "transport/build/apps/ping.bin",
+        repo / "build/kernel.bin",
+    ]
+    build = ["make", "-j4", "all", *host_targets]
+    run(build, repo)
+    crypto = sorted((repo / "build/transport/lib/crypto").rglob("*.o"))
+    affected = [*crypto, repo / probe, image, *(repo / path for path in host_targets)]
+    tracked = [*unrelated, *affected]
+
+    def mask_timestamp_updates() -> dict[Path, int]:
+        # Make origin checks win even when every existing output compares
+        # newer than any ordinary timestamp prerequisite, including a fresh stamp.
+        comparison_time = time.time_ns() + 120_000_000_000
+        for path in affected:
+            os.utime(path, ns=(path.stat().st_atime_ns, comparison_time))
+        return {path: timestamp(path) for path in tracked}
+
+    def require_source_bytes(expect_alternate: bool) -> None:
+        for path in (md, repo / probe, image, repo / host_targets[0]):
+            if (marker in path.read_bytes()) != expect_alternate:
+                raise RuntimeError(f"incorrect Mbed TLS source bytes in {path}")
+
+    require_source_bytes(False)
+    before = mask_timestamp_updates()
+    selection = f"MBEDTLS_SOURCE={alternate}"
+    # Changing one object must not mark an untouched application, image, or host test as current.
+    run(["make", selection, md_rel], repo)
+    assert_changed(before, [md], "partial switch to alternate Mbed TLS")
+    assert_unchanged(before, [path for path in tracked if path != md],
+                     "partial switch to alternate Mbed TLS")
+    alternate_build = [*build, selection]
+    run(alternate_build, repo)
+    assert_unchanged(before, unrelated, "switching the Mbed TLS source")
+    assert_changed(before, affected, "switching the Mbed TLS source")
+    require_source_bytes(True)
+    alternate_times = {path: timestamp(path) for path in tracked}
+    run(alternate_build, repo)
+    assert_unchanged(alternate_times, tracked, "unchanged Mbed TLS source")
+
+    before = mask_timestamp_updates()
+    run(build, repo)
+    assert_unchanged(before, unrelated, "restoring the Mbed TLS source")
+    assert_changed(before, affected, "restoring the Mbed TLS source")
+    require_source_bytes(False)
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mbedtls-source", type=Path, required=True)
+    mbedtls_source = parser.parse_args().mbedtls_source.resolve(strict=True)
+    # Subprocess make invocations run in a different tree. Preserve only the
+    # resolved source path instead of forwarding relative make overrides.
+    os.environ.pop("MAKEFLAGS", None)
+    os.environ["MBEDTLS_SOURCE"] = str(mbedtls_source)
     source = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="mini-os-build-test-") as directory:
         repo = Path(directory) / "repo"
@@ -1397,6 +1505,7 @@ def main() -> int:
         run(["make", "network-phase0-check"], repo)
         reject_invalid_platform_layout(repo)
         reject_invalid_raw_frame_layout(repo)
+        verify_mbedtls_missing(repo)
         run(["make", "clean"], repo)
         clean_build = run(["make"], repo)
         output = clean_build.stdout + clean_build.stderr
@@ -1408,6 +1517,8 @@ def main() -> int:
         verify_kernel_entry_stub(repo)
         run(["build/check_image", "build/mini_os.img"], repo)
         verify_deterministic_network_backends(repo)
+        verify_mbedtls_source_switch(repo, mbedtls_source)
+        run(["make"], repo)
         run(["make", "test-network-abi"], repo)
         reject_corrupt_images(repo)
         reject_reserved_injector_names(repo)

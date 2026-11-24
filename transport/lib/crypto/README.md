@@ -2,10 +2,10 @@
 
 `clear.c` provides compiler-resistant byte clearing without allocation or a dependency on the network, kernel, or SSH library.
 
-Only TCP-selected consumers link this object; raw-only and ICMP applications do not acquire it.
+The HMAC-SHA256 wrapper uses the Mbed TLS sources prepared by `make deps` or selected via `MBEDTLS_SOURCE`. The upstream sources and license remain outside the injected `transport/` tree.
 
-No hash, HMAC, entropy substitute, or SSH library is provided here yet.
+`mbedtls_mini_os.h` selects one freestanding configuration. Mbed TLS uses the runtime allocator and delegates explicit zeroing to `crypto_clear`. Keep this configuration and one owner per shared symbol when adding another crypto consumer.
 
-The future TCP PRF must import only the pinned Mbed TLS SHA-256/HMAC source, header, and license closure, with one freestanding configuration and one definition of each shared symbol for TCP and SSH consumers.
+Only TCP-selected consumers link these objects. Raw-only and ICMP applications do not acquire them.
 
-Its temporary allocations and allocation-failure cleanup require explicit measurement, while the application-instance secret remains separate from connection state and is cleared only at final TCP teardown.
+The wrapper clears output on failure and distinguishes allocation failure from other HMAC errors. Host tests force both allocation failures and check zeroing before freeing the temporary buffers. The TCP instance secret is owned separately and is cleared at final TCP teardown.

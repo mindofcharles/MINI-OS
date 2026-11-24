@@ -133,6 +133,13 @@ int tcp_connection_fail(int result)
     return result;
 }
 
+/* End just this connection. Other protocols can keep using the service step. */
+int tcp_connection_fail_event(int result)
+{
+    (void)tcp_connection_fail(result);
+    return 1;
+}
+
 int tcp_connection_complete(void)
 {
     struct tcp_connection *connection = &tcp_global_context.connection;
@@ -206,22 +213,27 @@ int tcp_connection_input(void *owner,
                           const struct net_ethernet_view *ethernet,
                           const struct net_ipv4_view *packet)
 {
+    struct tcp_connection *connection;
     struct tcp_segment_view segment;
     int classification;
 
-    (void)owner;
-    (void)ethernet;
+    if (owner != &tcp_global_context || ethernet == 0) {
+        return NET_ERR_INVALID;
+    }
+    connection = &tcp_global_context.connection;
     classification = tcp_segment_decode(packet, &segment);
     if (classification < 0) {
         return classification;
     }
     if (classification == TCP_SEGMENT_MALFORMED) {
         ++net_global_context.counters.malformed_frames;
-    } else {
-        /* Connection processing begins with active open. */
-        ++net_global_context.counters.unsupported_frames;
+        return 0;
     }
-    return 0;
+    if (connection->open.local_port == 0U) {
+        ++net_global_context.counters.unsupported_frames;
+        return 0;
+    }
+    return tcp_open_input(connection, packet, &segment);
 }
 
 void tcp_connection_service_failure(void *owner, int result)

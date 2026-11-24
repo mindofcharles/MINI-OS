@@ -21,7 +21,10 @@ enum tcp_error {
     TCP_ERR_ABORTED = -18,
     TCP_ERR_GENERATION_EXHAUSTED = -19,
     TCP_ERR_CONNECT_TIMEOUT = -20,
-    TCP_ERR_TRANSMIT_TIMEOUT = -21
+    TCP_ERR_TRANSMIT_TIMEOUT = -21,
+    TCP_ERR_ENTROPY = -22,
+    TCP_ERR_CRYPTO = -23,
+    TCP_ERR_NEIGHBOR_TIMEOUT = -24
 };
 
 enum {
@@ -83,8 +86,12 @@ int tcp_config_defaults(struct tcp_config *config);
  * Zero is one bounded service opportunity, not an implicit abort or EOF.
  * A pending handle is resumed only for the same endpoint and configuration.
  * Ordinary wait expiry preserves it; terminal causes remain until release.
- * The current foundation returns TCP_ERR_UNSUPPORTED without allocating a
- * handle, consuming entropy, resolving ARP, or sending a SYN.
+ * A successful final ACK commits the connection once the driver sends it.
+ * Resolving its next hop can leave the attempt pending after SYN-ACK.
+ * Returns zero when connected, TCP_ERR_WOULD_BLOCK while pending at zero wait,
+ * or NET_ERR_TIMEOUT when a positive call budget expires with work pending.
+ * Entropy, cryptographic and allocation failures during setup precede handle
+ * publication. A terminal connection error belongs to its published handle.
  */
 int tcp_connect(tcp_handle *handle, const struct tcp_endpoint *endpoint,
                  const struct tcp_config *config, unsigned int wait_ms);
@@ -110,7 +117,10 @@ int tcp_send(tcp_handle handle, const void *data, unsigned int length,
 int tcp_recv(tcp_handle handle, void *data, unsigned int capacity,
               unsigned int wait_ms);
 
-/* Seals new sends, schedules one logical FIN, and retains receive ownership. */
+/*
+ * Seals new sends, schedules one logical FIN, and retains receive ownership.
+ * Active connections return TCP_ERR_UNSUPPORTED until wire closing is added.
+ */
 int tcp_shutdown_write(tcp_handle handle);
 
 /*
@@ -120,6 +130,7 @@ int tcp_shutdown_write(tcp_handle handle);
  * Unread bytes return TCP_ERR_UNREAD without silently discarding them; drain
  * receive through EOF before retrying full close, or abort explicitly.
  * Graceful success requires protocol completion and an observed drained EOF.
+ * Active connections return TCP_ERR_UNSUPPORTED until wire closing is added.
  */
 int tcp_close(tcp_handle handle, unsigned int wait_ms);
 

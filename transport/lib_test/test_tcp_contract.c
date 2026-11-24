@@ -1,39 +1,143 @@
 #include <net/tcp.h>
 #include <net/net_platform.h>
 #include <net/raw.h>
+#include <crypto/hmac_sha256.h>
 #include <stdio.h>
 #include <string.h>
 
-int main(void)
+static const struct net_config network = {
+    {{10U, 0U, 2U, 15U}}, {{255U, 255U, 255U, 0U}}, {{10U, 0U, 2U, 2U}},
+    NET_ARP_CACHE_TTL_DEFAULT_MS, NET_ARP_RETRY_INTERVAL_MIN_MS,
+    NET_ARP_RETRY_COUNT_DEFAULT
+};
+static const struct tcp_endpoint endpoint = {{{10U, 0U, 2U, 2U}}, 22U};
+static const struct tcp_endpoint routed_endpoint = {{{192U, 0U, 2U, 9U}}, 22U};
+
+static int check_hmac_vector(void)
 {
-    static const struct net_config config = {
-        {{10U, 0U, 2U, 15U}}, {{255U, 255U, 255U, 0U}}, {{10U, 0U, 2U, 2U}},
-        NET_ARP_CACHE_TTL_DEFAULT_MS, NET_ARP_RETRY_INTERVAL_MIN_MS,
-        NET_ARP_RETRY_COUNT_DEFAULT
+    static const unsigned char input[] = "Hi There";
+    /* RFC 4231 test case 1, also checked on the host. */
+    static const unsigned char expected[CRYPTO_SHA256_BYTES] = {
+        0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
+        0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
+        0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
+        0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7
     };
-    static const struct tcp_endpoint endpoint = {{{10U, 0U, 2U, 2U}}, 22U};
-    struct tcp_config tcp_config;
+    unsigned char key[20];
+    unsigned char output[CRYPTO_SHA256_BYTES];
+
+    memset(key, 0x0b, sizeof(key));
+    return crypto_hmac_sha256(key, sizeof(key), input, sizeof(input) - 1U,
+                              output) == 0 &&
+           memcmp(output, expected, sizeof(expected)) == 0;
+}
+
+static int check_preflight(struct tcp_config *config)
+{
+    struct tcp_endpoint invalid = endpoint;
     struct tcp_status status;
     struct tcp_status saved;
     tcp_handle handle = TCP_INVALID_HANDLE;
     unsigned char byte = 0xA5U;
 
+    invalid.port = 0U;
     memset(&status, 0xA5, sizeof(status));
     saved = status;
-    if (net_init(&config) != 0 || tcp_config_defaults(&tcp_config) != 0 ||
-        tcp_config.close_grace_ms <= 240000U ||
-        tcp_connect(&handle, &endpoint, &tcp_config, 0U) != TCP_ERR_UNSUPPORTED ||
-        handle != TCP_INVALID_HANDLE ||
-        tcp_status(handle, &status) != NET_ERR_STATE ||
-        memcmp(&status, &saved, sizeof(status)) != 0 ||
-        tcp_recv(handle, &byte, 0U, 0U) != NET_ERR_INVALID ||
-        tcp_send(handle, &byte, 1U, 0U) != NET_ERR_STATE ||
-        byte != 0xA5U || net_idle(0U) != 0 ||
-        net_idle(1U) != SYS_ERR_UNAVAILABLE || tcp_deinit() != 0 ||
-        tcp_connect(&handle, &endpoint, 0, 0U) != NET_ERR_STATE) {
-        printf("E1 TCP CONTRACT TEST: FAIL\n");
+    return net_init(&network) == 0 && tcp_config_defaults(config) == 0 &&
+           config->close_grace_ms > 240000U &&
+           tcp_connect(&handle, &invalid, config, 0U) == NET_ERR_INVALID &&
+           handle == TCP_INVALID_HANDLE &&
+           tcp_status(handle, &status) == NET_ERR_STATE &&
+           memcmp(&status, &saved, sizeof(status)) == 0 &&
+           tcp_recv(handle, &byte, 0U, 0U) == NET_ERR_INVALID &&
+           tcp_send(handle, &byte, 1U, 0U) == NET_ERR_STATE &&
+           byte == 0xA5U && net_idle(0U) == 0 &&
+           net_idle(1U) == SYS_ERR_UNAVAILABLE;
+}
+
+static int check_disabled(void)
+{
+    tcp_handle handle = TCP_INVALID_HANDLE;
+
+    return tcp_deinit() == 0 &&
+           tcp_connect(&handle, &endpoint, 0, 0U) == NET_ERR_STATE &&
+           handle == TCP_INVALID_HANDLE;
+}
+
+static int check_open(const struct tcp_config *config,
+                      const struct tcp_endpoint *peer, int refuse)
+{
+    struct tcp_status status;
+    tcp_handle handle = TCP_INVALID_HANDLE;
+    unsigned char byte = 0xA5U;
+    int result;
+
+    result = tcp_connect(&handle, peer, config, 0U);
+    if (result != TCP_ERR_WOULD_BLOCK ||
+        handle == TCP_INVALID_HANDLE ||
+        tcp_status(handle, &status) != 0 || status.state != TCP_STATE_CONNECTING) {
+        printf("E3 TCP initial connect result: %d\n", result);
+        return 0;
+    }
+    result = tcp_connect(&handle, peer, config, 10000U);
+    if (refuse) {
+        if (result != TCP_ERR_REFUSED ||
+            tcp_status(handle, &status) != 0 ||
+            status.state != TCP_STATE_FAILED ||
+            status.terminal_result != TCP_ERR_REFUSED ||
+            tcp_recv(handle, &byte, 1U, 0U) != TCP_ERR_REFUSED ||
+            tcp_connect(&handle, peer, config, 0U) != TCP_ERR_REFUSED ||
+            byte != 0xA5U) {
+            printf("E3 TCP refusal result: %d\n", result);
+            return 0;
+        }
+    } else if (result != 0 ||
+               tcp_status(handle, &status) != 0 ||
+               status.state != TCP_STATE_ESTABLISHED ||
+               status.readable_bytes != 0U || status.writable_bytes != 0U ||
+               tcp_send(handle, &byte, 1U, 0U) != TCP_ERR_UNSUPPORTED ||
+               tcp_recv(handle, &byte, 1U, 0U) != TCP_ERR_UNSUPPORTED ||
+               tcp_close(handle, 0U) != TCP_ERR_UNSUPPORTED ||
+               tcp_shutdown_write(handle) != TCP_ERR_UNSUPPORTED ||
+               byte != 0xA5U || net_poll(10000U) <= 0 ||
+               net_poll(10000U) <= 0 ||
+               tcp_status(handle, &status) != 0 ||
+               status.readable_bytes != 0U || status.writable_bytes != 0U ||
+               status.state != TCP_STATE_ESTABLISHED || tcp_abort(handle) != 0) {
+        printf("E3 TCP handshake or ACK response result: %d\n", result);
+        return 0;
+    }
+    return tcp_release(handle) == 0 &&
+           tcp_status(handle, &status) == NET_ERR_STATE && check_disabled();
+}
+
+int main(int argc, char **argv)
+{
+    struct tcp_config config;
+    tcp_handle handle = TCP_INVALID_HANDLE;
+    int success;
+
+    if (argc != 2 || argv == 0 || argv[1] == 0 || !check_preflight(&config)) {
+        printf("E3 TCP preflight: FAIL\n");
         return 1;
     }
-    printf("E1 TCP CONTRACT TEST: PASS\n");
+    if (strcmp(argv[1], "entropy") == 0) {
+        success = tcp_connect(&handle, &endpoint, &config, 0U) == TCP_ERR_ENTROPY &&
+                  handle == TCP_INVALID_HANDLE && check_disabled();
+    } else if (strcmp(argv[1], "open") == 0 || strcmp(argv[1], "routed") == 0 ||
+               strcmp(argv[1], "refuse") == 0) {
+        success = check_open(&config, strcmp(argv[1], "routed") == 0 ?
+                             &routed_endpoint : &endpoint, strcmp(argv[1], "refuse") == 0);
+        if (success && !check_hmac_vector()) {
+            printf("E3 HMAC known-answer check: FAIL\n");
+            success = 0;
+        }
+    } else {
+        success = 0;
+    }
+    printf("E3 TCP %s: %s\n", argv[1], success ? "PASS" : "FAIL");
+    if (!success) {
+        return 1;
+    }
     return 0;
 }

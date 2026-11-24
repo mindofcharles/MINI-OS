@@ -3,6 +3,7 @@
 ## Test Targets
 
 ```bash
+make deps
 make check-layout
 make check-image
 make network-phase0-check
@@ -15,8 +16,9 @@ make test-network-d5
 make test-network-d6
 make test-network-e1
 make test-network-sanitizers
-make test-network-e1-qemu
 make test-network-e2
+make test-network-e3
+make test-network-e3-qemu
 make test-network-abi
 make test-network-driver
 make test-network-qemu
@@ -28,9 +30,11 @@ make test
 
 `make` first checks the platform memory layout and then runs the read-only image checker after host injection.
 
-`make test` runs the host network, TCP lifecycle and codec sanitizer, raw ABI, build-policy, deterministic NE2000, ARP/ICMP protocol, TCP-contract guest, and general QEMU end-to-end regressions.
+Run `make deps` once before the full test suite, or point `MBEDTLS_SOURCE` at a Mbed TLS 3.6.7 source tree. The tests do not download dependencies.
 
-`make test-network-host` compiles the application-level network and TCP headers plus `ping.c` under strict C90 and runs deterministic platform, network protocol, TCP lifecycle, and TCP codec regressions using the host test adapters.
+`make test` runs the host network and TCP sanitizer suites, the raw ABI and build-policy tests, and QEMU checks for NE2000, ARP/ICMP, TCP active open, and general system behavior.
+
+`make test-network-host` compiles the application-level network and TCP headers plus `ping.c` under strict C90 and runs deterministic platform, network protocol, TCP lifecycle, codec, and active-open regressions using the host test adapters.
 
 `make test-network-d1` compiles the application-level header under strict C90, target-compiles the fixed network context under modern C with fatal warnings, and runs the Phase D regression against the shared deterministic backend.
 
@@ -52,23 +56,25 @@ It target-compiles the network library as modern C with fatal warnings and build
 
 `make test-network-d6` checks exact ARP and ICMP wire packets through the production NE2000 driver, malformed and unrelated reply rejection, cache reuse and expiry, active inbound replies, bounded ARP and Echo timeouts, keyboard cancellation, and four successful Ping replies from the QEMU user-network router.
 
-`make test-network-e1` runs the host suite and target-compiles the modern-C TCP and shared-clear groups plus the strict-C90 guest contract probe.
+`make test-network-e1` runs the host suite and target-compiles the modern-C TCP and shared crypto groups plus the strict-C90 guest contract probe.
 
-`make test-network-e2` runs the host suite and target compilation from `test-network-e1` together with the instrumented host suite.
+`make test-network-e3` runs the host and instrumented suites and compiles the target objects and probe. The earlier `test-network-e2` entry point runs the same suite.
 
-`make test-network-sanitizers` builds and runs the same TCP lifecycle, codec, and sequence tests with AddressSanitizer and UndefinedBehaviorSanitizer. The instrumented binary includes the shared Ethernet, ARP, IPv4, and polling service.
+`make test-network-sanitizers` runs the TCP lifecycle, codec, sequence, and secure active-open tests with AddressSanitizer and UndefinedBehaviorSanitizer. The instrumented binary includes the pinned HMAC implementation and the shared Ethernet, ARP, IPv4, and polling service.
 
 It fails when the sanitizer build or runtime is unavailable instead of silently skipping coverage.
 
-`make test-network-e1-qemu` runs the public-contract guest probe twice on each RDRAND-on and RDRAND-off CPU configuration, requires a guarded shell return, and checks the temporary images.
+`make test-network-e3-qemu` checks the actual handshake through the production driver, including lost SYN and final ACK recovery, remote refusal, and the no-entropy path. It requires a guarded shell return and checks the temporary images. `make test-network-e1-qemu` remains an alias.
 
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 
 `make test-network-driver` runs a deterministic Ethernet peer against QEMU's NE2000 model and retains packet captures plus debug-console logs under `build/test-artifacts/` only when the regression fails.
 
-`make test-network-qemu` combines the deterministic raw-frame and protocol packet-socket regressions, TCP-foundation guest probe, and canonical QEMU end-to-end path, while `make test-network` additionally includes the host, sanitizer, and raw ABI suites.
+`make test-network-qemu` combines the raw-frame and protocol packet-socket regressions, TCP active-open probe, and general QEMU end-to-end tests. `make test-network` additionally includes the host, sanitizer, and raw ABI suites.
 
-`make test-build` first runs the pinned network-feasibility manifest and compiler-helper regression without downloading or compiling external SSH sources.
+`make test-build` checks the feasibility manifest, compiler helpers, cache preparation with synthetic archives, and missing and changed Mbed TLS source paths. Clean and fallback builds reuse the prepared source tree. No external SSH sources are needed.
+
+The source-switch regression masks timestamp differences, builds one crypto object before building its consumers, and checks which source's bytes reached the TCP binary and image. It also checks that unchanged builds stay incremental and that paths with spaces fail with a direct diagnostic.
 
 Tests require Python 3.9 or newer and `qemu-system-i386` in addition to the normal build tools.
 
@@ -248,7 +254,7 @@ Optional transport tests verify copied registration, validated IPv4 payload boun
 
 The isolated backend tests schedule out-of-order and wrapping-time receive events, drain bounded transmit history through repeated ring reuse, inject random errors and short fills, and advance idle time without consuming a packet or one-shot cancellation.
 
-The guest probe validates the real strict-C90 interface, unsupported-connect behavior, unchanged output on rejection, zero-capacity receive errors, target idle unavailability, final disable, and fresh state on the next application run.
+The guest probe validates the real strict-C90 interface, unchanged output on rejection, zero-capacity receive errors, target idle unavailability, final disable, and fresh state on the next application run.
 
 ## TCP Codec and Sequence Tests
 
@@ -259,3 +265,15 @@ Truncation tests back each input length with its own allocation so AddressSaniti
 Sequence cases cover equality, wraparound, half-open range boundaries, the ambiguous half-space distance, and the sequence positions consumed by SYN and FIN.
 
 The deterministic backend feeds a padded IPv4 frame through the registered TCP callback and checks the resulting classification and connection state. It also captures a complete frame generated in the existing transmit buffer for byte comparison, including Ethernet padding.
+
+## TCP Active-Open Validation
+
+The deterministic tests check a known HMAC-SHA256 answer, the canonical ISN tuple and same-tick generation behavior, and both temporary allocation failure points. The test allocator checks that each freed allocation was cleared. Short or unavailable entropy, allocation failure, and preflight cancellation leave the handle, wire, and ARP task untouched.
+
+Independent wire vectors exercise gateway routing, the same-sequence retransmissions, SYN-ACK matching, sequence wrap, duplicate final ACKs, and remote resets. Fake-clock tests cover short caller deadlines, the fixed connection budget, ARP cache refresh and failure, retry exhaustion, and retained terminal causes.
+
+The host tests also advance the clock inside the final send, drive concurrent Ping and TCP refusal or ARP and TCP expiry, and distinguish recovered receive drops from a failed device reset. Zero-window probes must receive an unchanged ACK, including after a bounded ARP refresh, without making bytes available to the application.
+
+`tests/network_phase_e.py` runs the strict-C90 guest probe against a controlled peer on a local QEMU packet socket. The peer compares the full Ethernet frames, injects SYN-ACK or a refusal, and verifies the ACK sequence and checksum. It deliberately ignores one SYN and repeats an accepted SYN-ACK to verify the corresponding retransmissions.
+
+The peer also delivers a routed SYN-ACK and zero-window probe from a MAC other than the configured gateway and checks that the guest sends its control frames to that gateway. The guest verifies an i386 HMAC known-answer vector. With RDRAND disabled, it reports `TCP_ERR_ENTROPY` with an unpublished handle and the peer sees no transmitted frame. Failures retain logs and captures under `build/test-artifacts/`.

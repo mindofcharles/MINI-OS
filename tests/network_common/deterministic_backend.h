@@ -15,6 +15,7 @@ void network_test_backend_clock_advance(unsigned int milliseconds);
 /* Optional advance before each clock read; reset and zero disable it. */
 void network_test_backend_set_clock_read_step(unsigned int milliseconds);
 void network_test_backend_set_receive_clock_step(unsigned int milliseconds);
+void network_test_backend_set_send_clock_step(unsigned int milliseconds);
 void network_test_backend_random_seed(unsigned int seed);
 void network_test_backend_set_cancelled(int cancelled);
 void network_test_backend_cancel_once(void);
