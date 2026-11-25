@@ -40,9 +40,32 @@ struct net_pending_arp {
     struct net_ipv4_addr address;
     struct net_mac_addr resolved_mac;
     net_u32 last_request_ms;
+    net_u32 owner;
+    net_u32 started_ms;
+    net_u32 timeout_ms;
     unsigned int attempts;
     int active;
     int resolved;
+    int result;
+};
+
+struct net_ethernet_view;
+struct net_ipv4_view;
+
+/*
+ * Private optional protocol binding, copied on registration.
+ * Service callbacks report local state changes as positive work.
+ * Negative results are shared network failures, not connection-local errors.
+ */
+struct net_transport_binding {
+    int (*input)(void *owner, const struct net_ethernet_view *ethernet,
+                 const struct net_ipv4_view *packet);
+    int (*timer)(void *owner, net_u32 now_ms);
+    int (*after_receive)(void *owner); /* Optional, after one input slot. */
+    void (*failure)(void *owner, int result);
+    void *owner;
+    net_u8 protocol;
+    net_u32 arp_owner; /* Current live generation, zero when no owned task is legal. */
 };
 
 struct net_pending_echo {
@@ -78,7 +101,11 @@ struct net_context {
     struct net_pending_arp pending_arp;
     struct net_pending_echo pending_echo;
     struct net_protocol_counters counters;
+    struct net_transport_binding transport;
     net_u32 arp_last_request_ms;
+    net_u32 io_started_ms;
+    unsigned int io_wait_ms;
+    unsigned int rx_deferred_length;
     net_u16 next_echo_identifier;
     int arp_request_seen;
     int initialized;

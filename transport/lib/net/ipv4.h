@@ -5,6 +5,7 @@
 
 enum {
     NET_IPV4_PROTOCOL_ICMP = 1,
+    NET_IPV4_PROTOCOL_TCP = 6,
     NET_IPV4_PAYLOAD_MAX = NET_IPV4_MTU - NET_IPV4_HEADER_SIZE
 };
 
@@ -34,6 +35,7 @@ int net_ipv4_handle(struct net_context *context,
 int net_ipv4_send(struct net_context *context,
                   const struct net_ipv4_addr *destination,
                   const struct net_mac_addr *next_hop_mac,
-                  net_u8 protocol, unsigned int payload_length);
+                  net_u8 protocol, unsigned int payload_length,
+                  const struct net_tx_deadline *deadline);
 
 #endif

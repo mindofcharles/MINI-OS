@@ -1,0 +1,2178 @@
+#include "../network_common/deterministic_backend.h"
+
+#include "../../transport/lib/net/arp.h"
+#include "../../transport/lib/net/net_platform.h"
+#include "../../transport/lib/net/tcp/internal.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#define CHECK(condition) do { if (!(condition)) { \
+    fprintf(stderr, "TCP stream test failure at line %d: %s\n", \
+            __LINE__, #condition); return 0; } } while (0)
+
+enum { FIN = 1, SYN = 2, RST = 4, PSH = 8, ACK = 16 };
+
+static const struct net_config network = {
+    {{10U, 0U, 2U, 15U}}, {{255U, 255U, 255U, 0U}}, {{10U, 0U, 2U, 2U}},
+    60000U, 1000U, 2U
+};
+static const struct tcp_endpoint remote = {{{192U, 0U, 2U, 9U}}, 22U};
+static const unsigned char local_mac[6] = {0x52, 0x54, 0, 0x12, 0x34, 0x56};
+static const struct net_mac_addr gateway = {{2U, 0U, 0U, 0U, 0U, 1U}};
+static const struct net_mac_addr refreshed = {{2U, 0U, 0U, 0U, 0U, 2U}};
+static const struct net_mac_addr incoming = {{2U, 0U, 0U, 0U, 0U, 3U}};
+
+struct peer {
+    tcp_handle handle;
+    unsigned int port;
+    net_u32 first_send;
+    net_u32 first_receive;
+};
+
+struct wire_segment {
+    net_u32 seq, ack;
+    unsigned int window, flags, mss;
+    const unsigned char *data;
+    unsigned int length;
+};
+
+/* An independent wire oracle, with no production encoder or decoder. */
+static void word(unsigned char *data, unsigned int value)
+{
+    data[0] = (unsigned char)(value >> 8U);
+    data[1] = (unsigned char)value;
+}
+
+static unsigned int read_word(const unsigned char *data)
+{
+    return ((unsigned int)data[0] << 8U) | data[1];
+}
+
+static net_u32 read_longword(const unsigned char *data)
+{
+    return (read_word(data) << 16U) | read_word(data + 2U);
+}
+
+static unsigned int sum_bytes(const unsigned char *data, unsigned int length,
+                              unsigned int sum)
+{
+    for (unsigned int index = 0U; index < length; ++index) {
+        sum += (unsigned int)data[index] << (index % 2U == 0U ? 8U : 0U);
+    }
+    while (sum > 0xffffU) {
+        sum = (sum & 0xffffU) + (sum >> 16U);
+    }
+    return sum;
+}
+
+static unsigned int build_frame(unsigned char *frame, const struct peer *peer,
+                                const struct net_mac_addr *mac, int to_guest,
+                                struct wire_segment segment)
+{
+    unsigned int header = segment.mss != 0U ? 24U : 20U;
+    unsigned int size = header + segment.length;
+    unsigned int wire_size = 34U + size;
+    unsigned char *ip = frame + 14U;
+    unsigned char *tcp = ip + 20U;
+
+    if (wire_size < NET_FRAME_MIN) {
+        wire_size = NET_FRAME_MIN;
+    }
+    memset(frame, 0, wire_size);
+    memcpy(frame, to_guest ? local_mac : mac->octets, 6U);
+    memcpy(frame + 6U, to_guest ? mac->octets : local_mac, 6U);
+    word(frame + 12U, 0x0800U);
+    ip[0] = 0x45U;
+    word(ip + 2U, 20U + size);
+    word(ip + 6U, 0x4000U);
+    ip[8] = 64U;
+    ip[9] = 6U;
+    memcpy(ip + 12U, to_guest ? remote.address.octets : network.address.octets, 4U);
+    memcpy(ip + 16U, to_guest ? network.address.octets : remote.address.octets, 4U);
+    word(ip + 10U, sum_bytes(ip, 20U, 0U) ^ 0xffffU);
+
+    word(tcp, to_guest ? remote.port : peer->port);
+    word(tcp + 2U, to_guest ? peer->port : remote.port);
+    word(tcp + 4U, segment.seq >> 16U);
+    word(tcp + 6U, segment.seq);
+    word(tcp + 8U, segment.ack >> 16U);
+    word(tcp + 10U, segment.ack);
+    tcp[12] = (unsigned char)(header << 2U);
+    tcp[13] = (unsigned char)segment.flags;
+    word(tcp + 14U, segment.window);
+    if (segment.mss != 0U) {
+        tcp[20] = 2U;
+        tcp[21] = 4U;
+        word(tcp + 22U, segment.mss);
+    }
+    if (segment.length != 0U) {
+        memcpy(tcp + header, segment.data, segment.length);
+    }
+    word(tcp + 16U, sum_bytes(tcp, size, sum_bytes(ip + 12U, 8U, 6U + size)) ^ 0xffffU);
+    return wire_size;
+}
+
+static int receive_later(const struct peer *peer, struct wire_segment segment,
+                          unsigned int delay)
+{
+    unsigned char frame[NET_FRAME_MAX];
+    unsigned int length = build_frame(frame, peer, &incoming, 1, segment);
+
+    return network_test_backend_schedule_receive(frame, length, delay) == 0;
+}
+
+static int expect(unsigned int index, const struct peer *peer,
+                  const struct net_mac_addr *mac, struct wire_segment segment)
+{
+    unsigned char frame[NET_FRAME_MAX];
+    unsigned int length = build_frame(frame, peer, mac, 0, segment);
+
+    CHECK(network_test_backend_transmit_length(index) == length);
+    CHECK(memcmp(frame, network_test_backend_transmit_frame(index), length) == 0);
+    return 1;
+}
+
+static int take(const struct peer *peer, const struct net_mac_addr *mac,
+                struct wire_segment segment)
+{
+    CHECK(expect(0U, peer, mac, segment));
+    return network_test_backend_drop_transmits(1U) == 0;
+}
+
+static int state(const struct peer *peer, enum tcp_state expected, int reason,
+                 unsigned int readable, unsigned int writable)
+{
+    struct tcp_status status;
+
+    CHECK(tcp_status(peer->handle, &status) == 0 && status.state == expected);
+    CHECK(status.terminal_result == reason);
+    CHECK(status.readable_bytes == readable && status.writable_bytes == writable);
+    CHECK(((status.flags & TCP_STATUS_READABLE) != 0U) == (readable != 0U));
+    CHECK((status.flags & TCP_STATUS_PEER_EOF) == 0U);
+    return 1;
+}
+
+static int reset(unsigned int clock, unsigned int ttl)
+{
+    struct net_config config = network;
+
+    config.arp_cache_ttl_ms = ttl;
+    network_test_backend_reset();
+    network_test_backend_random_seed(0x12345678U);
+    network_test_backend_clock_set(clock);
+    memset(&net_global_context, 0, sizeof(net_global_context));
+    memset(&tcp_global_context, 0, sizeof(tcp_global_context));
+    return net_init(&config) == 0;
+}
+
+static int establish_config(struct peer *peer, net_u32 irs, unsigned int window,
+                            unsigned int mss, const struct tcp_config *config)
+{
+    const unsigned char *syn;
+
+    peer->handle = TCP_INVALID_HANDLE;
+    peer->first_receive = irs + 1U;
+    CHECK(net_arp_cache_store(&net_global_context, &network.gateway, &gateway) == 0);
+    CHECK(tcp_connect(&peer->handle, &remote, config, 0U) == TCP_ERR_WOULD_BLOCK);
+    CHECK(network_test_backend_transmit_length(0U) == NET_FRAME_MIN);
+    syn = network_test_backend_transmit_frame(0U);
+    peer->port = read_word(syn + 34U);
+    peer->first_send = read_longword(syn + 38U) + 1U;
+    CHECK(take(peer, &gateway, (struct wire_segment){
+        .seq = peer->first_send - 1U, .flags = SYN, .mss = 536U
+    }));
+    CHECK(receive_later(peer, (struct wire_segment){
+        .seq = irs, .ack = peer->first_send, .window = window,
+        .flags = SYN | ACK, .mss = mss
+    }, 0U));
+    CHECK(tcp_connect(&peer->handle, &remote, config, 0U) == 0);
+    CHECK(take(peer, &gateway, (struct wire_segment){
+        .seq = peer->first_send, .ack = peer->first_receive,
+        .flags = ACK, .window = TCP_QUEUE_CAPACITY
+    }));
+    return state(peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY);
+}
+
+static int establish(struct peer *peer, net_u32 irs, unsigned int window, unsigned int mss)
+{
+    return establish_config(peer, irs, window, mss, 0);
+}
+
+static int dispose(struct peer *peer, int final)
+{
+    CHECK(tcp_abort(peer->handle) == 0 && tcp_release(peer->handle) == 0);
+    CHECK(!net_global_context.service_active && !net_global_context.pending_arp.active);
+    if (final) {
+        CHECK(tcp_deinit() == 0);
+    }
+    return 1;
+}
+
+static void pattern(unsigned char *data, unsigned int offset, unsigned int length,
+                    unsigned int salt)
+{
+    for (unsigned int index = 0U; index < length; ++index) {
+        unsigned int position = offset + index;
+
+        data[index] = (unsigned char)(position * 29U + position / 251U + salt);
+    }
+}
+
+static int ring_boundary(void)
+{
+    unsigned char guarded[TCP_QUEUE_CAPACITY + 2U];
+    unsigned char out[7];
+    static const unsigned char bytes[7] = {0U, 2U, 3U, 4U, 5U, 0U, 7U};
+    unsigned int tail = tcp_ring_offset(TCP_QUEUE_CAPACITY - 4U, 1U);
+
+    memset(guarded, 0xa5, sizeof(guarded));
+    tcp_ring_write(guarded + 1U, tail, bytes, sizeof(bytes));
+    tcp_ring_read(guarded + 1U, tail, out, sizeof(out));
+    CHECK(memcmp(out, bytes, sizeof(out)) == 0);
+    CHECK(guarded[0] == 0xa5U && guarded[TCP_QUEUE_CAPACITY + 1U] == 0xa5U);
+    CHECK(guarded[5] == 0xa5U && guarded[TCP_QUEUE_CAPACITY - 3U] == 0xa5U);
+    return 1;
+}
+
+static int transmit_boundaries(void)
+{
+    struct peer peer;
+    struct wire_segment reply, expected;
+    unsigned char data[TCP_QUEUE_CAPACITY + 13U], oracle[128];
+
+    /* This clock with the test seed gives a wire ISN of 0xffffffd0. */
+    CHECK(reset(1605633777U, network.arp_cache_ttl_ms));
+    CHECK(establish(&peer, 71U, 128U, 128U) && peer.first_send == 0xffffffd1U);
+    pattern(data, 0U, sizeof(data), 0U);
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == TCP_QUEUE_CAPACITY);
+    memset(data, 0x5a, sizeof(data)); /* Accepted data must no longer alias the caller. */
+    pattern(oracle, 0U, sizeof(oracle), 0U);
+    expected = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK, .data = oracle, .length = 128U
+    };
+    CHECK(take(&peer, &gateway, expected));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 0U));
+    network_test_backend_set_receive_clock_step(1U);
+    CHECK(tcp_send(peer.handle, data, 1U, 0U) == TCP_ERR_WOULD_BLOCK);
+    CHECK(tcp_send(peer.handle, data, 1U, 3U) == NET_ERR_TIMEOUT);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 0U));
+    network_test_backend_set_receive_clock_step(0U);
+
+    reply = (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send + 32U, .window = 128U, .flags = ACK
+    };
+    CHECK(receive_later(&peer, reply, 0U) && net_poll(0U) == 1);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 32U));
+    CHECK(net_poll(0U) == 0);
+    network_test_backend_clock_advance(TCP_SHORT_OVERRIDE_MS);
+    CHECK(net_poll(0U) == 1);
+    pattern(oracle, 128U, 32U, 0U);
+    expected.seq += 128U;
+    expected.length = 32U;
+    CHECK(take(&peer, &gateway, expected));
+
+    reply.ack = peer.first_send + 161U; /* Still queued, never sent. */
+    CHECK(receive_later(&peer, reply, 0U) && net_poll(0U) == 1);
+    expected.seq += 32U;
+    expected.length = 0U;
+    CHECK(take(&peer, &gateway, expected));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 32U));
+
+    reply.seq += 3U;
+    reply.ack = peer.first_send + 32U;
+    reply.window = 32U; /* Smaller than the outstanding flight. */
+    CHECK(receive_later(&peer, reply, 0U) && net_poll(0U) == 1);
+    --reply.seq;
+    reply.window = 512U; /* Older sequence cannot replace the newer window. */
+    CHECK(receive_later(&peer, reply, 0U) && net_poll(0U) == 0);
+    CHECK(net_poll(0U) == 0);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 32U));
+
+    reply.seq += 2U;
+    reply.ack = peer.first_send + 160U;
+    reply.window = 0U;
+    CHECK(receive_later(&peer, reply, 0U) && net_poll(0U) == 1);
+    CHECK(tcp_send(peer.handle, data, 13U, 0U) == 13);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 147U));
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+
+    reply.window = 7U;
+    CHECK(receive_later(&peer, reply, 0U) && net_poll(0U) == 1);
+    CHECK(net_poll(0U) == 0);
+    network_test_backend_clock_advance(TCP_SHORT_OVERRIDE_MS);
+    CHECK(net_poll(0U) == 1);
+    pattern(oracle, 160U, 7U, 0U);
+    expected.length = 7U;
+    CHECK(take(&peer, &gateway, expected));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 147U));
+    return dispose(&peer, 1);
+}
+
+static int arp_reply(const struct net_mac_addr *mac)
+{
+    static const unsigned char prefix[] = {8, 6, 0, 1, 8, 0, 6, 4, 0, 2};
+    unsigned char frame[NET_FRAME_MIN] = {0};
+
+    memcpy(frame, local_mac, 6U);
+    memcpy(frame + 6U, mac->octets, 6U);
+    memcpy(frame + 12U, prefix, sizeof(prefix));
+    memcpy(frame + 22U, mac->octets, 6U);
+    memcpy(frame + 28U, network.gateway.octets, 4U);
+    memcpy(frame + 32U, local_mac, 6U);
+    memcpy(frame + 38U, network.address.octets, 4U);
+    return network_test_backend_queue_receive(frame, sizeof(frame)) == 0;
+}
+
+static int take_arp_request(void)
+{
+    static const unsigned char header[] = {
+        255U, 255U, 255U, 255U, 255U, 255U, 0x52U, 0x54U, 0U, 0x12U, 0x34U, 0x56U,
+        8U, 6U, 0U, 1U, 8U, 0U, 6U, 4U, 0U, 1U
+    };
+    const unsigned char *frame;
+
+    CHECK(network_test_backend_transmit_length(0U) == NET_FRAME_MIN);
+    frame = network_test_backend_transmit_frame(0U);
+    CHECK(memcmp(frame, header, sizeof(header)) == 0);
+    CHECK(memcmp(frame + 38U, network.gateway.octets, 4U) == 0);
+    return network_test_backend_drop_transmits(1U) == 0;
+}
+
+static int receive_boundaries(void)
+{
+    struct peer peer;
+    struct wire_segment packet, ack;
+    unsigned char data[536], output[TCP_IPV4_DEFAULT_MSS], oracle[sizeof(output)];
+    unsigned int stored = 0U, delivered = 0U;
+
+    CHECK(reset(0U, 1000U) && establish(&peer, UINT_MAX - 7U, 512U, 0U));
+    pattern(data, 0U, 8U, 27U);
+    packet = (struct wire_segment){
+        .seq = peer.first_receive + 4U, .ack = peer.first_send, .window = 512U,
+        .flags = ACK, .data = data + 4U, .length = 4U
+    };
+    ack = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK
+    };
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1 && take(&peer, &gateway, ack));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    packet.seq = peer.first_receive;
+    packet.data = data;
+    ack.ack += 4U;
+    ack.window -= 4U;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1 && take(&peer, &gateway, ack));
+    packet.seq += 2U;
+    packet.data = data + 2U;
+    packet.length = 6U;
+    ack.ack += 4U;
+    ack.window -= 4U;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1 && take(&peer, &gateway, ack));
+    CHECK(ack.ack == 1U); /* Crossed the TCP sequence boundary. */
+    packet.seq = peer.first_receive;
+    packet.data = data;
+    packet.length = 8U;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1 && take(&peer, &gateway, ack));
+
+    stored = 8U;
+    while (stored < TCP_QUEUE_CAPACITY) {
+        unsigned int available = TCP_QUEUE_CAPACITY - stored;
+        unsigned int copied = available < 500U ? available : 500U;
+
+        packet.seq = peer.first_receive + stored;
+        packet.data = data;
+        /* The last segment spans the end of the advertised window. */
+        packet.length = copied + (copied == available ? 13U : 0U);
+        pattern(data, stored, packet.length, 27U);
+        stored += copied;
+        ack.ack += copied;
+        ack.window -= copied;
+        CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1);
+        CHECK(take(&peer, &gateway, ack));
+    }
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, TCP_QUEUE_CAPACITY, TCP_QUEUE_CAPACITY));
+    packet.seq = ack.ack + 1U;
+    packet.length = 0U;
+    packet.flags = RST;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 0);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    packet.seq = ack.ack;
+    packet.length = 1U;
+    packet.flags = ACK;
+    pattern(data, stored, 1U, 27U);
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1 && take(&peer, &gateway, ack));
+    packet.length = 0U;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 0);
+    --packet.seq;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1 && take(&peer, &gateway, ack));
+
+    network_test_backend_clock_advance(1000U);
+    CHECK(tcp_recv(peer.handle, output, 1U, 0U) == 1);
+    pattern(oracle, 0U, 1U, 27U);
+    CHECK(output[0] == oracle[0]);
+    CHECK(tcp_recv(peer.handle, output, sizeof(output) - 2U, 0U) == (int)sizeof(output) - 2);
+    pattern(oracle, 1U, sizeof(output) - 2U, 27U);
+    CHECK(memcmp(output, oracle, sizeof(output) - 2U) == 0);
+    CHECK(!net_global_context.pending_arp.active && network_test_backend_transmit_count() == 0U);
+    CHECK(tcp_recv(peer.handle, output, 1U, 0U) == 1 && take_arp_request());
+    pattern(oracle, sizeof(output) - 1U, 1U, 27U);
+    CHECK(output[0] == oracle[0]);
+    packet.seq = ack.ack;
+    packet.length = 1U;
+    /* The reopen threshold was reached, but no new credit left on the wire. */
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, TCP_QUEUE_CAPACITY - sizeof(output),
+                TCP_QUEUE_CAPACITY));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(net_global_context.pending_arp.started_ms == 1000U &&
+          net_global_context.pending_arp.attempts == 1U);
+    CHECK(arp_reply(&refreshed) && net_poll(0U) == 1 && net_poll(0U) == 1);
+    ack.window = sizeof(output);
+    CHECK(take(&peer, &refreshed, ack));
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1);
+    ++stored;
+    ++ack.ack;
+    --ack.window;
+    CHECK(take(&peer, &refreshed, ack));
+    delivered = sizeof(output);
+    while (delivered < stored) {
+        unsigned int need = stored - delivered;
+        unsigned int count = need < sizeof(output) ? need : sizeof(output);
+
+        CHECK(tcp_recv(peer.handle, output, sizeof(output), 0U) == (int)count);
+        pattern(oracle, delivered, count, 27U);
+        CHECK(memcmp(output, oracle, count) == 0);
+        delivered += count;
+        if (count == sizeof(output)) {
+            ack.window += count;
+            CHECK(take(&peer, &refreshed, ack));
+        } else {
+            CHECK(network_test_backend_transmit_count() == 0U);
+        }
+    }
+
+    /* A replay uses live sequence/credit; an attached FIN does not fake EOF. */
+    packet.seq = peer.first_receive - 1U;
+    packet.flags = SYN | ACK;
+    packet.length = 0U;
+    packet.window = 1U;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1 && take(&peer, &refreshed, ack));
+    CHECK(tcp_global_context.connection.stream.peer_window == 512U);
+    packet.seq = ack.ack;
+    packet.window = 512U;
+    packet.flags = ACK | FIN;
+    packet.length = 2U;
+    pattern(data, delivered, 2U, 27U);
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1);
+    ack.ack += 2U;
+    ack.window -= 2U;
+    CHECK(take(&peer, &refreshed, ack));
+    CHECK(tcp_recv(peer.handle, output, sizeof(output), 0U) == 2);
+    CHECK(memcmp(output, data, 2U) == 0);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(tcp_recv(peer.handle, output, sizeof(output), 0U) == TCP_ERR_WOULD_BLOCK);
+    network_test_backend_set_receive_clock_step(1U);
+    CHECK(tcp_recv(peer.handle, output, sizeof(output), 3U) == NET_ERR_TIMEOUT);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    packet.flags = RST;
+    packet.length = 0U;
+    packet.seq = peer.first_receive;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 0);
+    packet.seq = ack.ack;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1);
+    CHECK(state(&peer, TCP_STATE_FAILED, TCP_ERR_RESET, 0U, 0U));
+    return dispose(&peer, 1);
+}
+
+static int wait_services_both_directions(void)
+{
+    struct peer peer;
+    unsigned char queued[TCP_QUEUE_CAPACITY] = {0};
+    static const unsigned char input[] = {'a', 0U, 'b', 0U};
+    unsigned char output[4];
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, 77U, 0U, 128U));
+    CHECK(tcp_send(peer.handle, queued, sizeof(queued), 0U) == TCP_QUEUE_CAPACITY);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .window = 128U, .flags = ACK
+    }, 1U));
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .window = 128U,
+        .flags = ACK, .data = input, .length = 2U
+    }, 3U));
+    network_test_backend_set_receive_clock_step(1U);
+    CHECK(tcp_recv(peer.handle, output, sizeof(output), 10U) == 2);
+    CHECK(memcmp(output, input, 2U) == 0);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK, .data = queued, .length = 128U
+    }));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 0U));
+
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive + 2U, .ack = peer.first_send + 32U, .window = 128U,
+        .flags = ACK, .data = input + 2U, .length = 2U
+    }, 2U));
+    CHECK(tcp_send(peer.handle, input, sizeof(input), 8U) == (int)sizeof(input));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 2U, 32U - sizeof(input)));
+    CHECK(tcp_recv(peer.handle, output + 2U, 2U, 0U) == 2);
+    CHECK(memcmp(output, input, sizeof(input)) == 0);
+    return dispose(&peer, 1);
+}
+
+static int wait_expiry_retains_progress(void)
+{
+    static const unsigned char data[] = {1U, 0U, 2U};
+    static const unsigned char queued[TCP_QUEUE_CAPACITY] = {0};
+    struct peer peer;
+
+    for (unsigned int elapsed = 2U; elapsed <= 3U; ++elapsed) {
+        unsigned char output[sizeof(data)] = {0xffU, 0xffU, 0xffU};
+        net_u32 start;
+
+        CHECK(reset(UINT_MAX - 1U, network.arp_cache_ttl_ms) &&
+              establish(&peer, 31U, 64U, 64U));
+        start = net_clock_now_ms();
+        CHECK(receive_later(&peer, (struct wire_segment){
+            .seq = peer.first_receive, .ack = peer.first_send, .window = 64U,
+            .flags = ACK, .data = data, .length = sizeof(data)
+        }, elapsed));
+        network_test_backend_set_receive_clock_step(elapsed);
+        network_test_backend_set_send_clock_step(5U);
+        CHECK(tcp_recv(peer.handle, output, sizeof(output), 2U) == NET_ERR_TIMEOUT);
+        CHECK(net_elapsed_ms(start, net_clock_now_ms()) == elapsed);
+        CHECK(output[0] == 0xffU && output[1] == 0xffU && output[2] == 0xffU);
+        CHECK(network_test_backend_transmit_count() == 0U);
+        CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, sizeof(data), TCP_QUEUE_CAPACITY));
+        CHECK(tcp_recv(peer.handle, output, sizeof(output), 0U) == (int)sizeof(data));
+        CHECK(memcmp(data, output, sizeof(data)) == 0);
+        CHECK(take(&peer, &gateway, (struct wire_segment){
+            .seq = peer.first_send, .ack = peer.first_receive + sizeof(data),
+            .window = TCP_QUEUE_CAPACITY - sizeof(data), .flags = ACK
+        }));
+        CHECK(dispose(&peer, 1));
+
+        CHECK(reset(UINT_MAX - 1U, network.arp_cache_ttl_ms) &&
+              establish(&peer, 31U, 64U, 64U));
+        CHECK(tcp_send(peer.handle, queued, sizeof(queued), 0U) == (int)sizeof(queued));
+        CHECK(take(&peer, &gateway, (struct wire_segment){
+            .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+            .flags = ACK, .data = queued, .length = 64U
+        }));
+        start = net_clock_now_ms();
+        CHECK(receive_later(&peer, (struct wire_segment){
+            .seq = peer.first_receive, .ack = peer.first_send + 64U, .window = 64U, .flags = ACK
+        }, elapsed));
+        network_test_backend_set_receive_clock_step(elapsed);
+        CHECK(tcp_send(peer.handle, data, 1U, 2U) == NET_ERR_TIMEOUT);
+        CHECK(net_elapsed_ms(start, net_clock_now_ms()) == elapsed);
+        CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 64U));
+        CHECK(network_test_backend_transmit_count() == 0U);
+        CHECK(tcp_send(peer.handle, data, 1U, 0U) == 1);
+        CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, 63U));
+        CHECK(take(&peer, &gateway, (struct wire_segment){
+            .seq = peer.first_send + 64U, .ack = peer.first_receive,
+            .window = TCP_QUEUE_CAPACITY, .flags = ACK, .data = queued + 64U, .length = 64U
+        }));
+        CHECK(dispose(&peer, 1));
+    }
+    return 1;
+}
+
+static int started_io_can_finish(void)
+{
+    static const unsigned char bytes[] = {1U, 0U};
+    static const unsigned char input[TCP_IPV4_DEFAULT_MSS] = {1U};
+    struct peer peer;
+    unsigned char readback[sizeof(input)];
+    net_u32 start;
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, 31U, 64U, 64U));
+    memset(readback, 0xff, sizeof(readback));
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .window = 64U,
+        .flags = ACK, .data = input, .length = sizeof(input)
+    }, 0U));
+    start = net_clock_now_ms();
+    network_test_backend_set_send_clock_step(3U);
+    network_test_backend_set_receive_clock_step(1U);
+    CHECK(tcp_send(peer.handle, bytes, sizeof(bytes), 2U) == (int)sizeof(bytes));
+    CHECK(net_elapsed_ms(start, net_clock_now_ms()) == 3U);
+    CHECK(network_test_backend_transmit_time(0U) == start);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK | PSH, .data = bytes, .length = sizeof(bytes)
+    }));
+    CHECK(network_test_backend_pending_receive_count() == 1U);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - sizeof(bytes)));
+
+    /* A timely raw receive may start its ACK, but the read has not copied yet. */
+    start = net_clock_now_ms();
+    CHECK(tcp_recv(peer.handle, readback, sizeof(readback), 2U) == NET_ERR_TIMEOUT);
+    CHECK(readback[0] == 0xffU && net_elapsed_ms(start, net_clock_now_ms()) == 4U);
+    CHECK(net_elapsed_ms(start, network_test_backend_transmit_time(0U)) == 1U);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send + sizeof(bytes), .ack = peer.first_receive + sizeof(input),
+        .window = TCP_QUEUE_CAPACITY - sizeof(input), .flags = ACK
+    }));
+    /* Now the copy starts before the deadline; a slow window update cannot undo it. */
+    start = net_clock_now_ms();
+    CHECK(tcp_recv(peer.handle, readback, sizeof(readback), 2U) == (int)sizeof(readback));
+    CHECK(memcmp(readback, input, sizeof(readback)) == 0);
+    CHECK(net_elapsed_ms(start, net_clock_now_ms()) == 3U);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send + sizeof(bytes), .ack = peer.first_receive + sizeof(input),
+        .window = TCP_QUEUE_CAPACITY, .flags = ACK
+    }));
+    return dispose(&peer, 1);
+}
+
+static int deferred_raw_send_preserves_timers(void)
+{
+    static const unsigned char data[] = {1U, 0U};
+    const struct tcp_rto *rto = &tcp_global_context.connection.stream.rto;
+    struct peer peer;
+    struct wire_segment expected;
+    unsigned char output = 0xffU;
+
+    /* Keep the cache valid past the maximum neighbor resolution budget. */
+    CHECK(reset(300U, 300000U) && establish(&peer, 31U, 64U, 64U));
+    /* The eight clock reads after entry consume the wait at the raw TX gate. */
+    network_test_backend_set_clock_read_step(1U);
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 8U) == (int)sizeof(data));
+    network_test_backend_set_clock_read_step(0U);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(!net_global_context.pending_arp.active &&
+          !tcp_global_context.connection.stream.neighbor_pending);
+    network_test_backend_clock_advance(120001U);
+    expected = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK | PSH, .data = data, .length = sizeof(data)
+    };
+    CHECK(net_poll(0U) == 1 && take(&peer, &gateway, expected));
+    CHECK(rto->timer_started_ms == net_clock_now_ms() && rto->retries == 0U);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - sizeof(data)));
+
+    network_test_backend_clock_advance(1000U);
+    network_test_backend_set_clock_read_step(1U);
+    CHECK(tcp_recv(peer.handle, &output, 1U, 8U) == NET_ERR_TIMEOUT && output == 0xffU);
+    network_test_backend_set_clock_read_step(0U);
+    CHECK(network_test_backend_transmit_count() == 0U && rto->retries == 0U &&
+          rto->wait_ms == 1000U);
+    CHECK(net_poll(0U) == 1 && take(&peer, &gateway, expected));
+    CHECK(rto->retries == 1U && rto->wait_ms == 2000U);
+    return dispose(&peer, 1);
+}
+
+static int wait_expiry_defers_control_replies(void)
+{
+    static const unsigned char arp_header[] = {8, 6, 0, 1, 8, 0, 6, 4, 0, 1};
+    struct peer peer;
+    unsigned char frame[NET_FRAME_MIN];
+    unsigned char byte = 0xffU;
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, 31U, 64U, 64U));
+    for (int echo = 0; echo <= 1; ++echo) {
+        net_u32 received = net_global_context.counters.received_frames;
+        net_u32 learned = net_global_context.counters.arp_cache_updates;
+        net_u32 requests = net_global_context.counters.echo_requests;
+        const unsigned char *sent;
+
+        memset(frame, 0, sizeof(frame));
+        memcpy(frame, local_mac, sizeof(local_mac));
+        memcpy(frame + 6U, refreshed.octets, 6U);
+        if (echo) {
+            unsigned char *ip = frame + 14U, *icmp = ip + 20U;
+
+            word(frame + 12U, 0x0800U);
+            ip[0] = 0x45U;
+            word(ip + 2U, 29U);
+            word(ip + 6U, 0x4000U);
+            ip[8] = 64U;
+            ip[9] = 1U;
+            memcpy(ip + 12U, network.gateway.octets, 4U);
+            memcpy(ip + 16U, network.address.octets, 4U);
+            word(ip + 10U, sum_bytes(ip, 20U, 0U) ^ 0xffffU);
+            icmp[0] = 8U;
+            word(icmp + 4U, 7U);
+            word(icmp + 6U, 9U);
+            icmp[8] = 0x34U;
+            word(icmp + 2U, sum_bytes(icmp, 9U, 0U) ^ 0xffffU);
+        } else {
+            memcpy(frame + 12U, arp_header, sizeof(arp_header));
+            memcpy(frame + 22U, refreshed.octets, 6U);
+            memcpy(frame + 28U, network.gateway.octets, 4U);
+            memcpy(frame + 38U, network.address.octets, 4U);
+        }
+        CHECK(network_test_backend_schedule_receive(frame, sizeof(frame), 3U) == 0);
+        network_test_backend_set_receive_clock_step(3U);
+        CHECK(tcp_recv(peer.handle, &byte, 1U, 2U) == NET_ERR_TIMEOUT && byte == 0xffU);
+        CHECK(network_test_backend_transmit_count() == 0U);
+        CHECK(network_test_backend_pending_receive_count() == 0U);
+        CHECK(net_global_context.counters.received_frames == received &&
+              net_global_context.counters.arp_cache_updates == learned &&
+              net_global_context.counters.echo_requests == requests);
+
+        CHECK(net_poll(0U) == 1 && network_test_backend_transmit_length(0U) == NET_FRAME_MIN);
+        sent = network_test_backend_transmit_frame(0U);
+        CHECK(memcmp(sent, refreshed.octets, 6U) == 0);
+        if (echo) {
+            CHECK(read_word(sent + 12U) == 0x0800U && sent[34] == 0U && sent[42] == 0x34U);
+            CHECK(read_word(sent + 38U) == 7U && read_word(sent + 40U) == 9U);
+        } else {
+            CHECK(read_word(sent + 12U) == 0x0806U && read_word(sent + 20U) == 2U);
+        }
+        CHECK(net_global_context.counters.received_frames == received + 1U &&
+              net_global_context.counters.arp_cache_updates == learned + (echo == 0) &&
+              net_global_context.counters.echo_requests == requests + (echo != 0));
+        CHECK(network_test_backend_drop_transmits(1U) == 0 && net_poll(0U) == 0);
+    }
+    return dispose(&peer, 1);
+}
+
+static int duplex_bytes(void)
+{
+    enum { TX_COUNT = 7351U, RX_COUNT = 7129U };
+    unsigned char outbound[TX_COUNT], inbound[RX_COUNT], readback[173];
+    unsigned int accepted = 0U, emitted = 0U, supplied = 0U, read = 0U;
+    unsigned int last_ack = 0U, peer_acked = 0U, right = TCP_QUEUE_CAPACITY;
+    struct peer peer;
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, UINT_MAX - 2U, 400U, 311U));
+    pattern(outbound, 0U, sizeof(outbound), 0U);
+    pattern(inbound, 0U, sizeof(inbound), 77U);
+    for (unsigned int pass = 0U; pass < 256U; ++pass) {
+        unsigned int limit, count;
+        int result;
+
+        if (accepted != TX_COUNT) {
+            count = TX_COUNT - accepted;
+            if (count > 1807U) {
+                count = 1807U;
+            }
+            result = tcp_send(peer.handle, outbound + accepted, count, 0U);
+            CHECK(result == TCP_ERR_WOULD_BLOCK || (result > 0 && (unsigned int)result <= count));
+            if (result > 0) {
+                accepted += (unsigned int)result;
+            }
+        }
+        if (read != RX_COUNT) {
+            count = read == 0U ? 1U : sizeof(readback);
+            result = tcp_recv(peer.handle, readback, count, 0U);
+            CHECK(result == TCP_ERR_WOULD_BLOCK || (result > 0 && (unsigned int)result <= count));
+            if (result > 0) {
+                CHECK((unsigned int)result <= RX_COUNT - read);
+                CHECK(memcmp(readback, inbound + read, (unsigned int)result) == 0);
+                read += (unsigned int)result;
+            }
+        }
+        CHECK(net_poll(0U) >= 0);
+        while (network_test_backend_transmit_count() != 0U) {
+            const unsigned char *frame = network_test_backend_transmit_frame(0U);
+            unsigned int length, acknowledged, window, flags;
+
+            CHECK(network_test_backend_transmit_length(0U) >= NET_FRAME_MIN);
+            CHECK(read_word(frame + 16U) >= 40U);
+            length = read_word(frame + 16U) - 40U;
+            acknowledged = read_longword(frame + 42U) - peer.first_receive;
+            window = read_word(frame + 48U);
+            flags = frame[47];
+            CHECK(acknowledged >= peer_acked && acknowledged <= supplied);
+            CHECK(acknowledged + window >= right && acknowledged + window <= read + TCP_QUEUE_CAPACITY);
+            CHECK(length <= 311U && length <= accepted - emitted);
+            CHECK(flags == ACK || (length != 0U && flags == (ACK | PSH)));
+            CHECK(take(&peer, &gateway, (struct wire_segment){
+                .seq = peer.first_send + emitted, .ack = peer.first_receive + acknowledged,
+                .window = window, .flags = flags, .data = outbound + emitted, .length = length
+            }));
+            emitted += length;
+            peer_acked = acknowledged;
+            right = acknowledged + window;
+        }
+        if (last_ack == TX_COUNT && peer_acked == RX_COUNT && read == RX_COUNT) {
+            CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+            CHECK(accepted == TX_COUNT && emitted == TX_COUNT && supplied == RX_COUNT);
+            return dispose(&peer, 1);
+        }
+
+        limit = pass % 2U == 0U ? 239U : 317U;
+        count = RX_COUNT - supplied;
+        if (count > limit) {
+            count = limit;
+        }
+        CHECK(right >= supplied);
+        if (count > right - supplied) {
+            count = right - supplied;
+        }
+        if (count != 0U || last_ack != emitted) {
+            CHECK(receive_later(&peer, (struct wire_segment){
+                .seq = peer.first_receive + supplied, .ack = peer.first_send + emitted,
+                .window = 400U, .flags = ACK, .data = inbound + supplied, .length = count
+            }, 0U));
+            supplied += count;
+            last_ack = emitted;
+        }
+    }
+    CHECK(0 && "full duplex did not complete within the bounded trace");
+    return 0;
+}
+
+static int neighbor_during_stream(void)
+{
+    struct peer peer;
+    unsigned char outbound[100] = {0}, output[2];
+    static const unsigned char input[] = {0U, 1U};
+    struct wire_segment packet;
+
+    CHECK(reset(0U, 1000U) && establish(&peer, 29U, 64U, 64U));
+    CHECK(tcp_send(peer.handle, outbound, sizeof(outbound), 0U) == (int)sizeof(outbound));
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK, .data = outbound, .length = 64U
+    }));
+    network_test_backend_clock_advance(1000U);
+    packet = (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send + 32U, .window = 64U,
+        .flags = ACK, .data = input, .length = 1U
+    };
+    /* The RTO starts ARP first; the incoming partial ACK then changes the range. */
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 2 && take_arp_request());
+    CHECK(net_global_context.pending_arp.active &&
+          tcp_global_context.connection.stream.rto.retries == 0U);
+    CHECK(tcp_recv(peer.handle, output, 1U, 0U) == 1 && output[0] == 0U);
+    packet.seq += 1U;
+    packet.ack += 32U;
+    packet.data = input + 1U;
+    CHECK(receive_later(&peer, packet, 0U) && net_poll(0U) == 1);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 1U, TCP_QUEUE_CAPACITY - 36U));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(net_global_context.pending_arp.started_ms == 1000U &&
+          net_global_context.pending_arp.attempts == 1U);
+    CHECK(arp_reply(&refreshed) && net_poll(0U) == 1 && net_poll(0U) == 1);
+    CHECK(take(&peer, &refreshed, (struct wire_segment){
+        .seq = peer.first_send + 64U, .ack = peer.first_receive + 2U,
+        .window = TCP_QUEUE_CAPACITY - 2U, .flags = ACK | PSH,
+        .data = outbound + 64U, .length = 36U
+    }));
+    CHECK(tcp_recv(peer.handle, output + 1U, 1U, 0U) == 1 && output[1] == 1U);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    return dispose(&peer, 1);
+}
+
+static int retry_of_timed_prefix(void)
+{
+    unsigned char data[56];
+    struct peer peer;
+    struct wire_segment expected, ack;
+
+    CHECK(reset(1605633777U, network.arp_cache_ttl_ms) &&
+          establish(&peer, 31U, 64U, 64U) && peer.first_send == 0xffffffd1U);
+    pattern(data, 0U, sizeof(data), 9U);
+    CHECK(tcp_send(peer.handle, data, 40U, 0U) == 40);
+    expected = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK | PSH, .data = data, .length = 40U
+    };
+    CHECK(take(&peer, &gateway, expected));
+    network_test_backend_clock_advance(800U - TCP_SHORT_OVERRIDE_MS);
+    CHECK(tcp_send(peer.handle, data + 40U, 16U, 0U) == 16);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_advance(TCP_SHORT_OVERRIDE_MS);
+    CHECK(net_poll(0U) == 1);
+    expected.seq += 40U;
+    expected.data += 40U;
+    expected.length = 16U;
+    CHECK(take(&peer, &gateway, expected));
+
+    network_test_backend_clock_advance(199U);
+    ack = (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .window = 48U, .flags = ACK
+    };
+    CHECK(receive_later(&peer, ack, 0U) && net_poll(0U) == 1);
+    CHECK(receive_later(&peer, ack, 0U) && net_poll(0U) == 0);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1);
+    /* The newer 16-byte tail has only been in flight for 200 ms. */
+    expected.seq = peer.first_send;
+    expected.data = data;
+    expected.length = 40U;
+    expected.flags = ACK;
+    CHECK(take(&peer, &gateway, expected));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - sizeof(data)));
+
+    network_test_backend_clock_advance(20U);
+    ack.ack += 8U;
+    CHECK(receive_later(&peer, ack, 0U) && net_poll(0U) == 1);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - 48U));
+    network_test_backend_clock_advance(1999U);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1);
+    expected.seq += 8U;
+    expected.data += 8U;
+    expected.length = 48U;
+    expected.flags = ACK | PSH;
+    CHECK(take(&peer, &gateway, expected));
+    ack.ack = peer.first_send + sizeof(data);
+    CHECK(ack.ack < peer.first_send);
+    CHECK(receive_later(&peer, ack, 0U) && net_poll(0U) == 1);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    network_test_backend_clock_advance(4000U);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    return dispose(&peer, 1);
+}
+
+static int retry_after_neighbor_refresh(void)
+{
+    unsigned char data[64];
+    struct peer peer;
+    struct wire_segment expected;
+    const struct tcp_rto *rto = &tcp_global_context.connection.stream.rto;
+
+    CHECK(reset(0U, 1000U) && establish(&peer, 31U, 64U, 64U));
+    pattern(data, 0U, sizeof(data), 12U);
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    expected = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK | PSH, .data = data, .length = sizeof(data)
+    };
+    CHECK(take(&peer, &gateway, expected));
+    network_test_backend_clock_advance(1000U);
+    CHECK(net_poll(0U) == 1 && take_arp_request());
+    CHECK(rto->retries == 0U && rto->wait_ms == 1000U);
+    network_test_backend_clock_advance(50U);
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .window = 16U, .flags = ACK
+    }, 0U) && net_poll(0U) == 1);
+    CHECK(network_test_backend_transmit_count() == 0U && rto->retries == 0U);
+    CHECK(arp_reply(&refreshed) && net_poll(0U) == 1 && rto->retries == 0U);
+    CHECK(net_poll(0U) == 1 && network_test_backend_transmit_time(0U) == 1050U);
+    expected.flags = ACK;
+    expected.length = 16U;
+    CHECK(take(&peer, &refreshed, expected));
+    CHECK(rto->retries == 1U && rto->wait_ms == 2000U && rto->timer_started_ms == 1050U);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - sizeof(data)));
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .flags = ACK
+    }, 0U) && net_poll(0U) == 1);
+    network_test_backend_clock_advance(1999U);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(!net_global_context.pending_arp.active && rto->retries == 1U);
+    return dispose(&peer, 1);
+}
+
+static int ack_releases_idle_neighbor(void)
+{
+    static const unsigned char data[] = {9U, 0U, 8U};
+    static const unsigned int prefixes[] = {1U, sizeof(data)};
+    const struct net_ipv4_addr other = {{10U, 0U, 2U, 3U}};
+    struct peer peer;
+    struct net_mac_addr resolved;
+
+    for (unsigned int index = 0U; index < sizeof(prefixes) / sizeof(prefixes[0]); ++index) {
+        unsigned int acked = prefixes[index];
+
+        CHECK(reset(0U, 1000U) && establish(&peer, 31U, 64U, 64U));
+        CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+        CHECK(take(&peer, &gateway, (struct wire_segment){
+            .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+            .flags = ACK | PSH, .data = data, .length = sizeof(data)
+        }));
+        network_test_backend_clock_advance(1000U);
+        CHECK(net_poll(0U) == 1 && take_arp_request());
+        CHECK(net_global_context.pending_arp.active &&
+              net_global_context.pending_arp.owner == peer.handle);
+        CHECK(net_arp_cache_store(&net_global_context, &other, &refreshed) == 0);
+        CHECK(net_resolve_arp(&other, &resolved, 0U) == NET_ERR_BUSY);
+
+        network_test_backend_clock_advance(1U);
+        CHECK(receive_later(&peer, (struct wire_segment){
+            .seq = peer.first_receive, .ack = peer.first_send + acked,
+            .window = 64U, .flags = ACK
+        }, 0U) && net_poll(0U) == 1);
+        CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U,
+                    TCP_QUEUE_CAPACITY - (sizeof(data) - acked)));
+        /* No additional service call is needed before another ARP user. */
+        CHECK(net_resolve_arp(&other, &resolved, 0U) == 0);
+        CHECK(memcmp(&resolved, &refreshed, sizeof(resolved)) == 0);
+        CHECK(!net_global_context.pending_arp.active &&
+              !tcp_global_context.connection.stream.neighbor_pending);
+        CHECK(network_test_backend_transmit_count() == 0U);
+        if (acked < sizeof(data)) {
+            network_test_backend_clock_advance(1000U);
+            CHECK(net_poll(0U) == 1 && take_arp_request());
+            CHECK(net_global_context.pending_arp.started_ms == 2001U);
+        }
+        CHECK(dispose(&peer, 1));
+    }
+    return 1;
+}
+
+enum retry_cutoff {
+    RETRY_NO_ACK,
+    RETRY_DUPLICATE_ACK,
+    RETRY_ADVANCING_ACK,
+    RETRY_CLOSED_WINDOW,
+    RETRY_HARD_DEADLINE
+};
+
+static int retry_exhaustion(enum retry_cutoff cutoff)
+{
+    static const unsigned int retry_ms[] = {1000U, 3000U, 7000U, 15000U, 31000U};
+    static const unsigned char data[] = {0x85U, 0U, 0xfeU};
+    const net_u32 start = UINT_MAX - 700U;
+    struct tcp_config config;
+    struct peer peer;
+    struct wire_segment expected;
+    net_u32 received;
+    int reason;
+    unsigned char readback = 0xffU;
+
+    CHECK(tcp_config_defaults(&config) == 0);
+    if (cutoff == RETRY_HARD_DEADLINE) {
+        config.transmit_timeout_ms = 63000U;
+    }
+    CHECK(reset(start, 300000U) && establish_config(&peer, 31U, 64U, 64U, &config));
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    expected = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK | PSH, .data = data, .length = sizeof(data)
+    };
+    CHECK(take(&peer, &gateway, expected));
+    network_test_backend_set_receive_clock_step(1U);
+    CHECK(tcp_recv(peer.handle, &readback, 1U, 25U) == NET_ERR_TIMEOUT && readback == 0xffU);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - sizeof(data)));
+    network_test_backend_set_receive_clock_step(0U);
+    for (unsigned int index = 0U; index < sizeof(retry_ms) / sizeof(retry_ms[0]); ++index) {
+        network_test_backend_clock_set(start + retry_ms[index] - 1U);
+        CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+        network_test_backend_clock_advance(1U);
+        CHECK(net_poll(0U) == 1);
+        CHECK(network_test_backend_transmit_time(0U) == start + retry_ms[index]);
+        CHECK(take(&peer, &gateway, expected));
+    }
+    network_test_backend_clock_set(start + 62999U);
+    CHECK(net_poll(0U) == 0);
+    received = net_global_context.counters.received_frames;
+    if (cutoff != RETRY_NO_ACK) {
+        struct wire_segment ack = {
+            .seq = peer.first_receive, .ack = peer.first_send, .flags = ACK,
+            .window = cutoff == RETRY_CLOSED_WINDOW ? 0U : 64U
+        };
+
+        if (cutoff == RETRY_ADVANCING_ACK || cutoff == RETRY_HARD_DEADLINE) {
+            ack.ack += sizeof(data);
+        }
+        CHECK(receive_later(&peer, ack, 0U));
+        if (cutoff == RETRY_DUPLICATE_ACK) {
+            /* The ready advancing ACK behind it must not buy a second input slot. */
+            ack.ack += sizeof(data);
+            CHECK(receive_later(&peer, ack, 0U));
+        }
+    }
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1 && network_test_backend_transmit_count() == 0U);
+    CHECK(net_global_context.counters.received_frames - received == (cutoff != RETRY_NO_ACK));
+    if (cutoff == RETRY_ADVANCING_ACK || cutoff == RETRY_CLOSED_WINDOW) {
+        CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY -
+                    (cutoff == RETRY_CLOSED_WINDOW ? sizeof(data) : 0U)));
+        CHECK(net_poll(0U) == 0);
+    } else {
+        reason = cutoff == RETRY_HARD_DEADLINE ? TCP_ERR_TRANSMIT_TIMEOUT : TCP_ERR_RETRIES;
+        CHECK(state(&peer, TCP_STATE_FAILED, reason, 0U, 0U));
+        CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == reason);
+        CHECK(tcp_recv(peer.handle, &readback, 1U, 0U) == reason);
+    }
+    return dispose(&peer, 1);
+}
+
+static int raw_send_obeys_transmit_deadline(void)
+{
+    static const unsigned char data = 0x81U;
+    static const struct { unsigned int wait_ms, elapsed_ms; } cases[] = {
+        {0U, 6U}, {20U, 7U}
+    };
+    struct tcp_config config;
+    struct peer peer;
+    unsigned char readback = 0xffU;
+
+    CHECK(tcp_config_defaults(&config) == 0);
+    for (unsigned int index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        /* Clock reads move time across the deadline during frame preparation. */
+        unsigned int elapsed = cases[index].elapsed_ms;
+
+        for (unsigned int slack = 0U; slack <= 1U; ++slack) {
+            config.transmit_timeout_ms = elapsed + slack;
+            CHECK(reset(100U, network.arp_cache_ttl_ms) &&
+                  establish_config(&peer, 31U, 64U, 64U, &config));
+            network_test_backend_set_clock_read_step(1U);
+            /* The accepted byte is reported even if the same call notices expiry. */
+            CHECK(tcp_send(peer.handle, &data, 1U, cases[index].wait_ms) == 1);
+            network_test_backend_set_clock_read_step(0U);
+            if (slack == 0U) {
+                CHECK(network_test_backend_transmit_count() == 0U);
+                CHECK(state(&peer, TCP_STATE_FAILED, TCP_ERR_TRANSMIT_TIMEOUT, 0U, 0U));
+                CHECK(tcp_recv(peer.handle, &readback, 1U, 0U) == TCP_ERR_TRANSMIT_TIMEOUT);
+            } else {
+                CHECK(net_elapsed_ms(tcp_global_context.connection.transmit_started_ms,
+                                     network_test_backend_transmit_time(0U)) == elapsed);
+                CHECK(take(&peer, &gateway, (struct wire_segment){
+                    .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+                    .flags = ACK | PSH, .data = &data, .length = 1U
+                }));
+                CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - 1U));
+            }
+            CHECK(dispose(&peer, 1));
+        }
+    }
+    return 1;
+}
+
+static int transmit_progress_deadline(void)
+{
+    static const unsigned char data[] = {9U, 0U, 8U};
+    struct tcp_config config;
+    struct peer peer;
+    struct wire_segment ack;
+    unsigned char readback = 0xffU;
+
+    CHECK(tcp_config_defaults(&config) == 0);
+    config.transmit_timeout_ms = 20U;
+    CHECK(reset(0U, network.arp_cache_ttl_ms) &&
+          establish_config(&peer, 31U, 0U, 64U, &config));
+    network_test_backend_clock_advance(100U); /* No pending bytes: no deadline. */
+    CHECK(net_poll(0U) == 0);
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    network_test_backend_clock_advance(10U);
+    CHECK(tcp_send(peer.handle, data, 1U, 0U) == 1);
+    ack = (struct wire_segment){.seq = peer.first_receive, .ack = peer.first_send, .flags = ACK};
+    network_test_backend_clock_advance(9U);
+    CHECK(receive_later(&peer, ack, 0U) && net_poll(0U) == 0);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - 4U));
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1 && network_test_backend_transmit_count() == 0U);
+    CHECK(state(&peer, TCP_STATE_FAILED, TCP_ERR_TRANSMIT_TIMEOUT, 0U, 0U));
+    CHECK(tcp_recv(peer.handle, &readback, 1U, 0U) == TCP_ERR_TRANSMIT_TIMEOUT);
+    CHECK(dispose(&peer, 1));
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) &&
+          establish_config(&peer, 31U, 64U, 64U, &config));
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK | PSH, .data = data, .length = sizeof(data)
+    }));
+    network_test_backend_clock_advance(15U);
+    ack = (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send + 1U, .window = 64U, .flags = ACK
+    };
+    CHECK(receive_later(&peer, ack, 0U) && net_poll(0U) == 1);
+    network_test_backend_clock_advance(19U);
+    CHECK(net_poll(0U) == 0);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - 2U));
+    /* The receive itself crosses the new no-progress deadline. */
+    ack.ack = peer.first_send + sizeof(data);
+    CHECK(receive_later(&peer, ack, 2U));
+    network_test_backend_set_receive_clock_step(2U);
+    CHECK(net_poll(0U) == 1 && net_clock_now_ms() == 36U);
+    CHECK(state(&peer, TCP_STATE_FAILED, TCP_ERR_TRANSMIT_TIMEOUT, 0U, 0U));
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == TCP_ERR_TRANSMIT_TIMEOUT);
+    CHECK(dispose(&peer, 1));
+
+    CHECK(reset(0U, 1000U) && establish_config(&peer, 31U, 64U, 64U, &config));
+    network_test_backend_clock_advance(1000U);
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    CHECK(take_arp_request()); /* No first data transmission yet. */
+    CHECK(net_global_context.pending_arp.owner == peer.handle);
+    network_test_backend_clock_advance(20U);
+    CHECK(net_poll(0U) == 1 && network_test_backend_transmit_count() == 0U);
+    CHECK(state(&peer, TCP_STATE_FAILED, TCP_ERR_TRANSMIT_TIMEOUT, 0U, 0U));
+    return dispose(&peer, 1);
+}
+
+static int reset_challenge_rules(void)
+{
+    static const unsigned char queued[70] = {0};
+    static const unsigned char incoming_bytes[] = {0xffU, 0U};
+    struct peer peer;
+    struct wire_segment reply, reset_packet;
+
+    CHECK(reset(UINT_MAX - 249U, network.arp_cache_ttl_ms) &&
+          establish(&peer, UINT_MAX - 4U, 64U, 64U));
+    CHECK(tcp_send(peer.handle, queued, sizeof(queued), 0U) == (int)sizeof(queued));
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK, .data = queued, .length = 64U
+    }));
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .window = 64U,
+        .flags = ACK, .data = incoming_bytes, .length = sizeof(incoming_bytes)
+    }, 0U) && net_poll(0U) == 1);
+    reply = (struct wire_segment){
+        .seq = peer.first_send + 64U,
+        .ack = peer.first_receive + sizeof(incoming_bytes),
+        .window = TCP_QUEUE_CAPACITY - sizeof(incoming_bytes), .flags = ACK
+    };
+    CHECK(take(&peer, &gateway, reply));
+
+    reset_packet = (struct wire_segment){
+        .seq = peer.first_receive + TCP_QUEUE_CAPACITY, .flags = RST
+    };
+    CHECK(receive_later(&peer, reset_packet, 0U) && net_poll(0U) == 0);
+    reset_packet.seq = reply.ack - 1U;
+    CHECK(receive_later(&peer, reset_packet, 0U) && net_poll(0U) == 0);
+    CHECK(network_test_backend_transmit_count() == 0U);
+
+    /* An abort from the peer can arrive ahead of its last in-flight bytes. */
+    reset_packet.seq = reply.ack + 3U;
+    CHECK(reset_packet.seq == 1U);
+    CHECK(receive_later(&peer, reset_packet, 0U) && net_poll(0U) == 1);
+    CHECK(take(&peer, &gateway, reply));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, sizeof(incoming_bytes),
+                TCP_QUEUE_CAPACITY - sizeof(queued)));
+    network_test_backend_clock_advance(499U);
+    CHECK(receive_later(&peer, reset_packet, 0U) && net_poll(0U) == 0);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_advance(1U);
+    CHECK(receive_later(&peer, reset_packet, 0U) && net_poll(0U) == 1);
+    CHECK(take(&peer, &gateway, reply));
+
+    reset_packet.seq = reply.ack; /* Exact reset takes effect even during the limit. */
+    CHECK(receive_later(&peer, reset_packet, 0U) && net_poll(0U) == 1);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(state(&peer, TCP_STATE_FAILED, TCP_ERR_RESET, 0U, 0U));
+    return dispose(&peer, 1);
+}
+
+static int reset_challenge_neighbor_refresh(void)
+{
+    static const unsigned char bytes[] = {1U, 0U, 2U};
+    struct peer peer;
+
+    for (int resolved = 0; resolved <= 1; ++resolved) {
+        CHECK(reset(0U, 1000U) && establish(&peer, 31U, 0U, 64U));
+        network_test_backend_clock_advance(1000U);
+        CHECK(receive_later(&peer, (struct wire_segment){
+            .seq = peer.first_receive + 1U, .flags = RST
+        }, 0U) && net_poll(0U) == 1);
+        CHECK(net_poll(0U) == 1 && take_arp_request());
+        if (resolved) {
+            /* Normal data becomes sendable while the empty challenge is pending. */
+            CHECK(tcp_send(peer.handle, bytes, sizeof(bytes), 0U) == (int)sizeof(bytes));
+            CHECK(receive_later(&peer, (struct wire_segment){
+                .seq = peer.first_receive, .ack = peer.first_send,
+                .flags = ACK, .window = 64U
+            }, 0U) && net_poll(0U) == 1);
+            CHECK(arp_reply(&refreshed) && net_poll(0U) == 1);
+            CHECK(net_poll(0U) == 1 && take(&peer, &refreshed, (struct wire_segment){
+                .seq = peer.first_send, .ack = peer.first_receive,
+                .window = TCP_QUEUE_CAPACITY, .flags = ACK
+            }));
+            CHECK(net_poll(0U) == 1 && take(&peer, &refreshed, (struct wire_segment){
+                .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+                .flags = ACK | PSH, .data = bytes, .length = sizeof(bytes)
+            }));
+        } else {
+            network_test_backend_clock_advance(1000U);
+            CHECK(net_poll(0U) == 1 && take_arp_request());
+            network_test_backend_clock_advance(1000U);
+            CHECK(net_poll(0U) == 1);
+            CHECK(!net_global_context.pending_arp.active && net_poll(0U) == 0);
+        }
+        CHECK(network_test_backend_transmit_count() == 0U);
+        CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U,
+                    TCP_QUEUE_CAPACITY - (resolved ? sizeof(bytes) : 0U)));
+        CHECK(dispose(&peer, 1));
+    }
+    return 1;
+}
+
+static int failure_and_reuse(void)
+{
+    struct peer peer;
+    tcp_handle last = TCP_INVALID_HANDLE;
+    unsigned char data[] = {1U, 0U, 2U};
+
+    CHECK(reset(0U, 1000U));
+    for (unsigned int mode = 0U; mode < 3U; ++mode) {
+        int reason = mode == 0U ? NET_ERR_CANCELLED :
+                     mode == 1U ? TCP_ERR_RESET : TCP_ERR_NEIGHBOR_TIMEOUT;
+
+        CHECK(establish(&peer, 10U, 512U, 0U) && peer.handle != last);
+        if (last != TCP_INVALID_HANDLE) {
+            CHECK(tcp_send(last, data, 1U, 0U) == NET_ERR_STATE);
+        }
+        if (mode == 0U) {
+            network_test_backend_cancel_once();
+        } else if (mode == 1U) {
+            CHECK(receive_later(&peer, (struct wire_segment){
+                .seq = peer.first_receive, .flags = RST
+            }, 0U));
+        } else {
+            network_test_backend_clock_advance(1000U);
+        }
+        CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+        if (mode == 2U) {
+            CHECK(net_global_context.pending_arp.active && take_arp_request());
+            network_test_backend_clock_advance(1000U);
+            CHECK(net_poll(0U) == 1 && take_arp_request());
+            network_test_backend_clock_advance(1000U);
+            CHECK(net_poll(0U) == 1);
+        }
+        CHECK(state(&peer, TCP_STATE_FAILED, reason, 0U, 0U));
+        CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == reason);
+        CHECK(tcp_recv(peer.handle, data, sizeof(data), 0U) == reason);
+        CHECK(!net_global_context.pending_arp.active);
+        for (unsigned int index = 0U; index < TCP_QUEUE_CAPACITY; ++index) {
+            CHECK(tcp_global_context.connection.tx_queue[index] == 0U &&
+                  tcp_global_context.connection.rx_queue[index] == 0U);
+        }
+        last = peer.handle;
+        CHECK(dispose(&peer, 0));
+        network_test_backend_clear_transmits();
+    }
+    CHECK(tcp_deinit() == 0);
+    return 1;
+}
+
+static int read_progress_then_device_failure(void)
+{
+    static const unsigned char data[] = {1U, 0U, 2U, 3U};
+    static const unsigned char inbound[TCP_IPV4_DEFAULT_MSS + 2U] = {1U, 0U, 2U, 3U};
+    unsigned char output[sizeof(inbound)];
+    const unsigned int update = TCP_IPV4_DEFAULT_MSS;
+    struct peer peer;
+    tcp_handle old;
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, 29U, 64U, 64U));
+    memset(output, 0xff, sizeof(output));
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .window = 64U,
+        .flags = ACK, .data = inbound, .length = update
+    }, 0U) && net_poll(0U) == 1);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive + update,
+        .window = TCP_QUEUE_CAPACITY - update, .flags = ACK
+    }));
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive + update, .ack = peer.first_send, .window = 64U,
+        .flags = ACK, .data = inbound + update, .length = 2U
+    }, 0U) && net_poll(0U) == 1);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive + sizeof(inbound),
+        .window = TCP_QUEUE_CAPACITY - sizeof(inbound), .flags = ACK
+    }));
+
+    /* The read has already copied bytes when the window update fails to send. */
+    CHECK(network_test_backend_set_next_send_error(SYS_ERR_DEVICE) == 0);
+    CHECK(tcp_recv(peer.handle, output, update, 0U) == (int)update);
+    CHECK(memcmp(output, inbound, update) == 0 && output[update] == 0xffU && output[update + 1U] == 0xffU);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(state(&peer, TCP_STATE_FAILED, NET_ERR_DEVICE, 0U, 0U));
+    CHECK(tcp_recv(peer.handle, output + update, 2U, 0U) == NET_ERR_DEVICE);
+    CHECK(output[update] == 0xffU && output[update + 1U] == 0xffU);
+    old = peer.handle;
+    CHECK(dispose(&peer, 0));
+
+    CHECK(establish(&peer, 31U, 64U, 64U) && peer.handle != old);
+    CHECK(tcp_recv(old, output, sizeof(output), 0U) == NET_ERR_STATE);
+    CHECK(tcp_recv(peer.handle, output, sizeof(output), 0U) == TCP_ERR_WOULD_BLOCK);
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK | PSH, .data = data, .length = sizeof(data)
+    }));
+    return dispose(&peer, 1);
+}
+
+enum {
+    CONGESTION_SMSS = 64,
+    CONGESTION_WARMUP = 10 * CONGESTION_SMSS,
+    CONGESTION_FLIGHT = 5 * CONGESTION_SMSS,
+    CONGESTION_END = CONGESTION_WARMUP + CONGESTION_FLIGHT
+};
+
+struct congestion_fixture {
+    struct peer peer;
+    unsigned char data[CONGESTION_END + CONGESTION_SMSS];
+    unsigned int length;
+};
+
+static int take_congestion_frame(const struct congestion_fixture *fixture,
+                                  const struct net_mac_addr *mac,
+                                  unsigned int offset, unsigned int length)
+{
+    return take(&fixture->peer, mac, (struct wire_segment){
+        .seq = fixture->peer.first_send + offset, .ack = fixture->peer.first_receive,
+        .window = TCP_QUEUE_CAPACITY, .data = fixture->data + offset, .length = length,
+        .flags = ACK | (length != 0U && offset + length == fixture->length ? PSH : 0U)
+    });
+}
+
+static int congestion_ack(const struct congestion_fixture *fixture,
+                           unsigned int offset, unsigned int window, int actions)
+{
+    CHECK(receive_later(&fixture->peer, (struct wire_segment){
+        .seq = fixture->peer.first_receive, .ack = fixture->peer.first_send + offset,
+        .window = window, .flags = ACK
+    }, 0U));
+    CHECK(net_poll(0U) == actions);
+    return 1;
+}
+
+static int prepare_congestion_flight(struct congestion_fixture *fixture, net_u32 start,
+                                      unsigned int ttl, int unsent_tail)
+{
+    unsigned int offset = 0U;
+
+    fixture->length = CONGESTION_END + (unsent_tail ? CONGESTION_SMSS : 0U);
+    pattern(fixture->data, 0U, fixture->length, 45U);
+    CHECK(reset(start, ttl));
+    CHECK(establish(&fixture->peer, 31U, CONGESTION_FLIGHT, CONGESTION_SMSS));
+    CHECK(tcp_send(fixture->peer.handle, fixture->data, fixture->length, 0U) ==
+          (int)fixture->length);
+
+    for (unsigned int flight = 1U; flight <= 5U; ++flight) {
+        for (unsigned int segment = 0U; segment < flight; ++segment) {
+            CHECK(offset == 0U || net_poll(0U) == 1);
+            CHECK(take_congestion_frame(fixture, &gateway, offset, CONGESTION_SMSS));
+            offset += CONGESTION_SMSS;
+        }
+        /* The next cumulative ACK is withheld until the entire flight is sent. */
+        CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+        if (flight < 5U) {
+            CHECK(congestion_ack(fixture, offset, CONGESTION_FLIGHT, 1));
+        }
+    }
+    CHECK(offset == CONGESTION_END);
+    return 1;
+}
+
+static int queue_fast_retry(const struct congestion_fixture *fixture)
+{
+    CHECK(congestion_ack(fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 0));
+    CHECK(congestion_ack(fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 0));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(congestion_ack(fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 1));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    return 1;
+}
+
+static int fast_recovery_on_wire(void)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    const struct tcp_congestion *cc = &connection->stream.congestion;
+    const net_u32 start = 1605633777U; /* The first data sequence is just before wrap. */
+    const unsigned int partial = CONGESTION_WARMUP + 2U * CONGESTION_SMSS;
+    struct congestion_fixture fixture;
+    unsigned long long srtt, variance;
+
+    CHECK(prepare_congestion_flight(&fixture, start, network.arp_cache_ttl_ms, 1));
+    CHECK(fixture.peer.first_send == 0xffffffd1U && cc->cwnd == CONGESTION_FLIGHT);
+    srtt = rto->srtt_q3;
+    variance = rto->variance_q3;
+    network_test_backend_clock_advance(200U);
+    CHECK(queue_fast_retry(&fixture));
+    CHECK(cc->cwnd == CONGESTION_FLIGHT && rto->timer_started_ms == start);
+    CHECK(net_poll(0U) == 1);
+    CHECK(take_congestion_frame(&fixture, &gateway, CONGESTION_WARMUP, CONGESTION_SMSS));
+    CHECK(connection->tx_outstanding == CONGESTION_FLIGHT &&
+          connection->transmit_started_ms == start);
+    CHECK(rto->retries == 0U && rto->wait_ms == 1000U && rto->timer_started_ms == start + 200U);
+    CHECK(cc->recovery_end == fixture.peer.first_send + CONGESTION_END);
+
+    /* A and C were lost. Repairing A acknowledges A+B but still leaves C missing. */
+    network_test_backend_clock_advance(50U);
+    CHECK(congestion_ack(&fixture, partial, CONGESTION_FLIGHT, 1));
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway, partial, CONGESTION_SMSS));
+    CHECK(rto->retries == 0U && rto->wait_ms == 1000U && rto->timer_started_ms == start + 250U);
+    CHECK(net_poll(0U) == 1);
+    CHECK(take_congestion_frame(&fixture, &gateway, CONGESTION_END, CONGESTION_SMSS));
+    CHECK(connection->tx_outstanding == 4U * CONGESTION_SMSS);
+
+    network_test_backend_clock_advance(50U);
+    CHECK(congestion_ack(&fixture, CONGESTION_END, CONGESTION_FLIGHT, 1));
+    CHECK(cc->cwnd == 2U * CONGESTION_SMSS && connection->tx_outstanding == CONGESTION_SMSS);
+    CHECK(rto->srtt_q3 == srtt && rto->variance_q3 == variance); /* Karn applies to both repairs. */
+    for (unsigned int index = 0U; index < 3U; ++index) {
+        CHECK(congestion_ack(&fixture, CONGESTION_END, CONGESTION_FLIGHT, 0));
+    }
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(congestion_ack(&fixture, fixture.length, CONGESTION_FLIGHT, 1));
+    CHECK(state(&fixture.peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    return dispose(&fixture.peer, 1);
+}
+
+static int idle_restart_on_wire(void)
+{
+    const struct tcp_congestion *cc = &tcp_global_context.connection.stream.congestion;
+    const unsigned int reopened_window = CONGESTION_FLIGHT + CONGESTION_SMSS;
+    struct congestion_fixture fixture;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, network.arp_cache_ttl_ms, 0));
+    CHECK(congestion_ack(&fixture, CONGESTION_END, CONGESTION_FLIGHT, 1));
+    CHECK(cc->cwnd == reopened_window);
+    network_test_backend_clock_advance(1000U);
+    /* An incoming window report does not make the outgoing path non-idle. */
+    CHECK(congestion_ack(&fixture, CONGESTION_END, reopened_window, 1));
+    fixture.peer.first_send += CONGESTION_END;
+    fixture.length = 2U * CONGESTION_SMSS;
+    CHECK(tcp_send(fixture.peer.handle, fixture.data, fixture.length, 0U) == (int)fixture.length);
+    CHECK(take_congestion_frame(&fixture, &gateway, 0U, CONGESTION_SMSS));
+    CHECK(cc->cwnd == CONGESTION_SMSS);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(congestion_ack(&fixture, CONGESTION_SMSS, reopened_window, 1));
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_SMSS, CONGESTION_SMSS));
+    CHECK(congestion_ack(&fixture, fixture.length, reopened_window, 1));
+    CHECK(state(&fixture.peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    return dispose(&fixture.peer, 1);
+}
+
+static int idle_restart_with_outstanding(unsigned int flight, int expiry_during_lookup)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_congestion *cc = &connection->stream.congestion;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    const unsigned int credit = CONGESTION_SMSS - flight;
+    struct congestion_fixture fixture;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, network.arp_cache_ttl_ms, 0));
+    network_test_backend_clock_set(800U);
+    CHECK(congestion_ack(&fixture, CONGESTION_END - flight, CONGESTION_FLIGHT, 1));
+    CHECK(connection->tx_outstanding == flight && cc->cwnd > CONGESTION_SMSS);
+    CHECK(rto->timer_started_ms == 800U && rto->wait_ms == 1000U && cc->last_data_sent_ms == 0U);
+
+    fixture.length += CONGESTION_SMSS;
+    pattern(fixture.data + CONGESTION_END, CONGESTION_END, CONGESTION_SMSS, 45U);
+    network_test_backend_clock_set(expiry_during_lookup ? 996U : 1100U);
+    if (expiry_during_lookup) {
+        /* Initial data selection is at 998 ms; the MAC lookup crosses 1000. */
+        network_test_backend_set_clock_read_step(1U);
+    }
+    CHECK(tcp_send(fixture.peer.handle, fixture.data + CONGESTION_END,
+                   CONGESTION_SMSS, 0U) == CONGESTION_SMSS);
+    network_test_backend_set_clock_read_step(0U);
+    CHECK(cc->cwnd == CONGESTION_SMSS && rto->timer_started_ms == 800U && rto->retries == 0U);
+    if (expiry_during_lookup) {
+        CHECK(connection->stream.neighbor_started_ms == 999U && net_clock_now_ms() >= 1000U);
+        CHECK(!net_global_context.pending_arp.active && !connection->stream.neighbor_pending);
+    }
+    if (credit != 0U) {
+        CHECK(network_test_backend_transmit_count() == 0U);
+        network_test_backend_clock_advance(TCP_SHORT_OVERRIDE_MS);
+        CHECK(net_poll(0U) == 1);
+        CHECK(take_congestion_frame(&fixture, &gateway, CONGESTION_END, credit));
+    }
+    CHECK(cc->last_data_sent_ms == (credit != 0U ? 1100U + TCP_SHORT_OVERRIDE_MS : 0U));
+    CHECK(connection->tx_outstanding == CONGESTION_SMSS);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+
+    CHECK(congestion_ack(&fixture, CONGESTION_END + credit, CONGESTION_FLIGHT, 1));
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_END + credit, flight));
+    CHECK(congestion_ack(&fixture, fixture.length, CONGESTION_FLIGHT, 1));
+    CHECK(state(&fixture.peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    return dispose(&fixture.peer, 1);
+}
+
+static int timeout_loss_threshold_after_partial_ack(void)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_congestion *cc = &connection->stream.congestion;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    const unsigned int half = CONGESTION_SMSS / 2U;
+    struct congestion_fixture fixture;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, network.arp_cache_ttl_ms, 0));
+    network_test_backend_clock_set(1000U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_WARMUP, CONGESTION_SMSS));
+    CHECK(cc->ssthresh == CONGESTION_FLIGHT / 2U && rto->retries == 1U);
+
+    network_test_backend_clock_set(1010U);
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP + half, half, 1));
+    CHECK(rto->retries == 0U && rto->wait_ms == 2000U);
+    network_test_backend_clock_set(3010U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_WARMUP + half, half));
+    CHECK(cc->ssthresh == CONGESTION_FLIGHT / 2U && rto->retries == 1U);
+
+    /* This ACK clears the previously retransmitted prefix, but not the flight. */
+    network_test_backend_clock_set(3020U);
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP + CONGESTION_SMSS, half, 1));
+    CHECK(rto->retries == 0U && rto->wait_ms == 4000U);
+    network_test_backend_clock_set(7020U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_WARMUP + CONGESTION_SMSS, half));
+    CHECK(cc->ssthresh == 2U * CONGESTION_SMSS && rto->retries == 1U);
+    return dispose(&fixture.peer, 1);
+}
+
+static int window_reports_and_rto(void)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_congestion *cc = &connection->stream.congestion;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    const unsigned int window = 34U;
+    struct congestion_fixture fixture;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, network.arp_cache_ttl_ms, 1));
+    network_test_backend_clock_advance(200U);
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 0));
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 0));
+    for (unsigned int next = 32U; next <= window; ++next) {
+        CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, next, 1));
+    }
+    for (unsigned int index = 0U; index < 3U; ++index) {
+        CHECK(congestion_ack(&fixture, CONGESTION_WARMUP - 1U, window, 0));
+        CHECK(receive_later(&fixture.peer, (struct wire_segment){
+            .seq = fixture.peer.first_receive, .ack = fixture.peer.first_send + CONGESTION_WARMUP,
+            .window = window, .flags = ACK | FIN
+        }, 0U) && net_poll(0U) == 1);
+        CHECK(take_congestion_frame(&fixture, &gateway, CONGESTION_END, 0U));
+    }
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, window, 0));
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(cc->cwnd == CONGESTION_FLIGHT && connection->tx_outstanding == CONGESTION_FLIGHT);
+    CHECK(rto->timer_started_ms == 0U && connection->transmit_started_ms == 0U);
+
+    network_test_backend_clock_set(1000U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway, CONGESTION_WARMUP, window));
+    CHECK(cc->cwnd == CONGESTION_SMSS && cc->ssthresh == CONGESTION_FLIGHT / 2U);
+    CHECK(rto->retries == 1U && rto->wait_ms == 2000U);
+    for (unsigned int index = 0U; index < 3U; ++index) {
+        CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, window, 0));
+    }
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_set(3000U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway, CONGESTION_WARMUP, window));
+    CHECK(cc->ssthresh == CONGESTION_FLIGHT / 2U && rto->retries == 2U);
+    return dispose(&fixture.peer, 1);
+}
+
+enum fast_wait { FAST_RESUME, FAST_CANCEL, FAST_RTO };
+
+static int fast_retry_waits_for_neighbor(enum fast_wait mode)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    struct congestion_fixture fixture;
+    unsigned char output = 0xffU;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, 200U, 0));
+    network_test_backend_clock_set(200U);
+    CHECK(queue_fast_retry(&fixture));
+    CHECK(net_poll(0U) == 1 && take_arp_request());
+    CHECK(net_global_context.pending_arp.active && rto->timer_started_ms == 0U);
+
+    if (mode == FAST_CANCEL) {
+        CHECK(congestion_ack(&fixture, CONGESTION_END, CONGESTION_FLIGHT, 1));
+        CHECK(!net_global_context.pending_arp.active && !connection->stream.neighbor_pending);
+        CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+        CHECK(state(&fixture.peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+        return dispose(&fixture.peer, 1);
+    }
+
+    network_test_backend_clock_set(mode == FAST_RTO ? 1000U : 225U);
+    CHECK(arp_reply(&refreshed) && net_poll(0U) == 1);
+    if (mode == FAST_RESUME) {
+        /* Resuming an owned lookup skips the clock read for starting ARP. */
+        network_test_backend_set_clock_read_step(1U);
+        CHECK(tcp_recv(fixture.peer.handle, &output, 1U, 7U) == NET_ERR_TIMEOUT && output == 0xffU);
+        network_test_backend_set_clock_read_step(0U);
+        CHECK(network_test_backend_transmit_count() == 0U && rto->timer_started_ms == 0U);
+        CHECK(connection->stream.congestion.cwnd == CONGESTION_FLIGHT);
+    }
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &refreshed,
+                                                     CONGESTION_WARMUP, CONGESTION_SMSS));
+    CHECK(rto->retries == (mode == FAST_RTO ? 1U : 0U));
+    CHECK(rto->wait_ms == (mode == FAST_RTO ? 2000U : 1000U));
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    return dispose(&fixture.peer, 1);
+}
+
+static int peer_window_report(const struct peer *peer, net_u32 ack, unsigned int window,
+                              int actions)
+{
+    CHECK(receive_later(peer, (struct wire_segment){
+        .seq = peer->first_receive, .ack = ack, .window = window, .flags = ACK
+    }, 0U));
+    CHECK(net_poll(0U) == actions);
+    return 1;
+}
+
+static int short_send_override(void)
+{
+    static const unsigned char data[] = {1U, 0U, 2U};
+    const net_u32 start = UINT_MAX - 100U;
+    struct peer peer;
+    struct wire_segment frame;
+    unsigned char output = 0xffU;
+
+    CHECK(reset(start, network.arp_cache_ttl_ms) && establish(&peer, 31U, 64U, 64U));
+    CHECK(tcp_send(peer.handle, data, 1U, 0U) == 1);
+    frame = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .window = TCP_QUEUE_CAPACITY,
+        .flags = ACK | PSH, .data = data, .length = 1U
+    };
+    CHECK(take(&peer, &gateway, frame)); /* A one-byte request never waits for more writes. */
+    CHECK(tcp_send(peer.handle, data + 1U, 1U, 0U) == 1);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_set(start + 100U);
+    CHECK(tcp_send(peer.handle, data + 2U, 1U, 0U) == 1);
+    CHECK(peer_window_report(&peer, peer.first_send, 64U, 0));
+    CHECK(peer_window_report(&peer, peer.first_send, 2U, 1));
+    network_test_backend_clock_set(start + TCP_SHORT_OVERRIDE_MS - 1U);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1);
+    ++frame.seq;
+    ++frame.data;
+    frame.flags = ACK;
+    CHECK(take(&peer, &gateway, frame)); /* The timer does not overrun a shrunken window. */
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+
+    CHECK(peer_window_report(&peer, peer.first_send + 2U, 64U, 1));
+    CHECK(net_poll(0U) == 1);
+    ++frame.seq;
+    ++frame.data;
+    frame.flags = ACK | PSH;
+    CHECK(take(&peer, &gateway, frame));
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send + sizeof(data),
+        .flags = ACK, .window = 64U, .data = data + 1U, .length = 1U
+    }, 0U) && net_poll(0U) == 1);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send + sizeof(data), .ack = peer.first_receive + 1U,
+        .flags = ACK, .window = TCP_QUEUE_CAPACITY - 1U
+    }));
+    CHECK(tcp_recv(peer.handle, &output, 1U, 0U) == 1 && output == data[1]);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    return dispose(&peer, 1);
+}
+
+static int window_update_on_data(void)
+{
+    static const unsigned char inbound[TCP_IPV4_DEFAULT_MSS] = {1U};
+    static const unsigned char outbound = 0x45U;
+    unsigned char output[sizeof(inbound)];
+    struct peer peer;
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, 31U, 0U, 64U));
+    CHECK(tcp_send(peer.handle, &outbound, 1U, 0U) == 1);
+    CHECK(receive_later(&peer, (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .flags = ACK,
+        .data = inbound, .length = sizeof(inbound)
+    }, 0U) && net_poll(0U) == 1);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive + sizeof(inbound),
+        .flags = ACK, .window = TCP_QUEUE_CAPACITY - sizeof(inbound)
+    }));
+    CHECK(tcp_recv(peer.handle, output, sizeof(output) - 1U, 0U) == (int)sizeof(output) - 1);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    peer.first_receive += sizeof(inbound);
+    CHECK(peer_window_report(&peer, peer.first_send, 64U, 1));
+    CHECK(tcp_recv(peer.handle, output + sizeof(output) - 1U, 1U, 0U) == 1);
+    CHECK(memcmp(inbound, output, sizeof(output)) == 0);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .flags = ACK | PSH,
+        .window = TCP_QUEUE_CAPACITY, .data = &outbound, .length = 1U
+    }));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    return dispose(&peer, 1);
+}
+
+static int persist_new_probe(int accepted)
+{
+    static const unsigned char warmup[46] = {0xa3U}, data[] = {4U, 0U, 6U};
+    const struct tcp_stream *stream = &tcp_global_context.connection.stream;
+    const net_u32 start = 1605633777U;
+    struct peer peer;
+    struct wire_segment probe;
+    unsigned long long srtt;
+    unsigned char output = 0xffU;
+
+    CHECK(reset(start, network.arp_cache_ttl_ms) && establish(&peer, 31U, 64U, 64U));
+    CHECK(tcp_send(peer.handle, warmup, sizeof(warmup), 0U) == (int)sizeof(warmup));
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .flags = ACK | PSH,
+        .window = TCP_QUEUE_CAPACITY, .data = warmup, .length = sizeof(warmup)
+    }));
+    peer.first_send += sizeof(warmup);
+    CHECK(peer.first_send == UINT_MAX && peer_window_report(&peer, peer.first_send, 0U, 1));
+    srtt = stream->rto.srtt_q3;
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    network_test_backend_set_receive_clock_step(10U);
+    CHECK(tcp_recv(peer.handle, &output, 1U, 20U) == NET_ERR_TIMEOUT && output == 0xffU);
+    network_test_backend_set_receive_clock_step(0U);
+    network_test_backend_clock_set(start + 999U);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    /* ACK across wrap is not valid before the first byte is actually sent. */
+    CHECK(peer_window_report(&peer, 0U, 0U, 1));
+    probe = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .flags = ACK,
+        .window = TCP_QUEUE_CAPACITY
+    };
+    CHECK(take(&peer, &gateway, probe));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - sizeof(data)));
+    probe.data = data;
+    probe.length = 1U;
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1 && take(&peer, &gateway, probe));
+    CHECK(stream->flow.probe_sent && stream->flow.persist_wait_ms == 2000U);
+    CHECK(tcp_global_context.connection.tx_outstanding == 0U);
+    network_test_backend_clock_set(start + 1500U);
+    CHECK(peer_window_report(&peer, peer.first_send, 0U, 0));
+    network_test_backend_clock_set(start + 2999U);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1 && take(&peer, &gateway, probe));
+    CHECK(stream->flow.persist_wait_ms == 4000U && stream->rto.retries == 0U &&
+          stream->rto.wait_ms == 1000U && stream->congestion.last_data_sent_ms == start);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - sizeof(data)));
+
+    CHECK(peer_window_report(&peer, peer.first_send + (accepted ? 1U : 0U),
+                              accepted ? 2U : 1U, 1));
+    CHECK(stream->flow.persist_wait_ms == 0U && net_poll(0U) == 1);
+    if (!accepted) {
+        CHECK(take(&peer, &gateway, probe)); /* Retransmit the same byte as ordinary data. */
+        CHECK(stream->rto.timer_right == 0U && stream->rto.retries == 0U);
+        CHECK(peer_window_report(&peer, 0U, 2U, 1) && net_poll(0U) == 1);
+    }
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = 0U, .ack = peer.first_receive, .flags = ACK | PSH,
+        .window = TCP_QUEUE_CAPACITY, .data = data + 1U, .length = 2U
+    }));
+    CHECK(!stream->flow.probe_sent && stream->rto.srtt_q3 == srtt);
+    CHECK(peer_window_report(&peer, 2U, 2U, 1));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    return dispose(&peer, 1);
+}
+
+static int persist_preserves_loss_budget(void)
+{
+    static const unsigned int retry_times[] = {1000U, 3000U, 7000U, 15000U, 31000U};
+    static const unsigned char data[] = {4U, 0U, 6U};
+    const struct tcp_rto *rto = &tcp_global_context.connection.stream.rto;
+    struct wire_segment frame;
+    struct peer peer;
+
+    CHECK(reset(0U, 300000U) && establish(&peer, 31U, 64U, 64U));
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    frame = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .flags = ACK | PSH,
+        .window = TCP_QUEUE_CAPACITY, .data = data, .length = sizeof(data)
+    };
+    CHECK(take(&peer, &gateway, frame));
+    for (unsigned int index = 0U; index < sizeof(retry_times) / sizeof(retry_times[0]); ++index) {
+        network_test_backend_clock_set(retry_times[index]);
+        CHECK(net_poll(0U) == 1 && take(&peer, &gateway, frame));
+    }
+    CHECK(rto->retries == TCP_DATA_RETRY_LIMIT && rto->wait_ms == 32000U);
+    network_test_backend_clock_set(31001U);
+    CHECK(peer_window_report(&peer, peer.first_send, 0U, 1));
+    network_test_backend_clock_set(63000U);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_advance(1U);
+    frame.flags = ACK;
+    frame.length = 1U;
+    CHECK(net_poll(0U) == 1 && take(&peer, &gateway, frame));
+    CHECK(rto->retries == TCP_DATA_RETRY_LIMIT && rto->timer_started_ms == 31000U);
+    network_test_backend_clock_set(63005U);
+    CHECK(peer_window_report(&peer, peer.first_send, 64U, 1));
+    CHECK(rto->retries == TCP_DATA_RETRY_LIMIT && rto->timer_started_ms == 63005U);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(peer_window_report(&peer, peer.first_send + sizeof(data), 64U, 1));
+    CHECK(rto->retries == 0U && state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    return dispose(&peer, 1);
+}
+
+static int persist_deadline_across_wrap(void)
+{
+    static const unsigned char data[] = {1U, 0U, 2U};
+    const net_u32 start = UINT_MAX - 500U;
+    struct tcp_config config;
+    struct peer peer;
+
+    CHECK(tcp_config_defaults(&config) == 0);
+    config.transmit_timeout_ms = 3000U;
+    CHECK(reset(start - 5000U, network.arp_cache_ttl_ms) &&
+          establish_config(&peer, 31U, 0U, 64U, &config));
+    network_test_backend_clock_set(start);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    network_test_backend_clock_set(start + 999U);
+    CHECK(net_poll(0U) == 0);
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1 && take(&peer, &gateway, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .flags = ACK,
+        .window = TCP_QUEUE_CAPACITY, .data = data, .length = 1U
+    }));
+    network_test_backend_clock_set(start + 2999U);
+    CHECK(peer_window_report(&peer, peer.first_send, 0U, 0));
+    network_test_backend_clock_advance(1U);
+    CHECK(net_poll(0U) == 1 && network_test_backend_transmit_count() == 0U);
+    CHECK(state(&peer, TCP_STATE_FAILED, TCP_ERR_TRANSMIT_TIMEOUT, 0U, 0U));
+    return dispose(&peer, 1);
+}
+
+static int persist_waits_for_neighbor(void)
+{
+    static const unsigned char data[] = {4U, 0U, 6U};
+    const struct tcp_flow *flow = &tcp_global_context.connection.stream.flow;
+    struct peer peer;
+    unsigned char output = 0xffU;
+
+    CHECK(reset(0U, 500U) && establish(&peer, 31U, 0U, 64U));
+    CHECK(tcp_send(peer.handle, data, sizeof(data), 0U) == (int)sizeof(data));
+    network_test_backend_clock_set(1000U);
+    CHECK(net_poll(0U) == 1 && take_arp_request());
+    CHECK(!flow->probe_sent && flow->persist_started_ms == 0U && flow->persist_wait_ms == 1000U);
+    network_test_backend_clock_advance(50U);
+    CHECK(arp_reply(&refreshed) && net_poll(0U) == 1);
+    network_test_backend_set_clock_read_step(1U);
+    CHECK(tcp_recv(peer.handle, &output, 1U, 7U) == NET_ERR_TIMEOUT && output == 0xffU);
+    network_test_backend_set_clock_read_step(0U);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(!flow->probe_sent && flow->persist_started_ms == 0U && flow->persist_wait_ms == 1000U);
+    CHECK(net_poll(0U) == 1 && flow->probe_sent && flow->persist_wait_ms == 2000U);
+    CHECK(flow->persist_started_ms == network_test_backend_transmit_time(0U));
+    CHECK(take(&peer, &refreshed, (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive, .flags = ACK,
+        .window = TCP_QUEUE_CAPACITY, .data = data, .length = 1U
+    }));
+    return dispose(&peer, 1);
+}
+
+static int persist_backoff_cap(void)
+{
+    static const unsigned int due[] = {1000U, 3000U, 7000U, 15000U, 31000U, 63000U,
+                                       123000U, 183000U};
+    static const unsigned char byte = 0x74U;
+    const struct tcp_stream *stream = &tcp_global_context.connection.stream;
+    struct peer peer;
+
+    CHECK(reset(0U, 300000U) && establish(&peer, 31U, 0U, 64U));
+    CHECK(tcp_send(peer.handle, &byte, 1U, 0U) == 1);
+    for (unsigned int index = 0U; index < sizeof(due) / sizeof(due[0]); ++index) {
+        network_test_backend_clock_set(due[index] - 1U);
+        CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+        network_test_backend_clock_advance(1U);
+        CHECK(net_poll(0U) == 1 && take(&peer, &gateway, (struct wire_segment){
+            .seq = peer.first_send, .ack = peer.first_receive, .flags = ACK,
+            .window = TCP_QUEUE_CAPACITY, .data = &byte, .length = 1U
+        }));
+    }
+    CHECK(stream->flow.persist_wait_ms == 60000U && stream->rto.retries == 0U);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY - 1U));
+    return dispose(&peer, 1);
+}
+
+static int persist_and_receive_credit(void)
+{
+    static const unsigned char data[TCP_IPV4_DEFAULT_MSS] = {0xc1U};
+    static const unsigned char outgoing = 0x63U;
+    struct peer peer;
+    struct wire_segment ack, inbound;
+    unsigned char output[sizeof(data)];
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, 31U, 0U, 64U));
+    CHECK(tcp_send(peer.handle, &outgoing, 1U, 0U) == 1);
+    ack = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive,
+        .window = TCP_QUEUE_CAPACITY, .flags = ACK
+    };
+    inbound = (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .flags = ACK, .data = data
+    };
+    while (ack.window != 0U) {
+        inbound.length = ack.window < sizeof(data) ? ack.window : sizeof(data);
+        CHECK(receive_later(&peer, inbound, 0U) && net_poll(0U) == 1);
+        inbound.seq += inbound.length;
+        ack.ack += inbound.length;
+        ack.window -= inbound.length;
+        CHECK(take(&peer, &gateway, ack));
+    }
+    CHECK(tcp_recv(peer.handle, output, sizeof(output) - 1U, 0U) == (int)sizeof(output) - 1);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_set(999U);
+    inbound.length = 1U;
+    CHECK(receive_later(&peer, inbound, 0U) && net_poll(0U) == 1 && take(&peer, &gateway, ack));
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, TCP_QUEUE_CAPACITY - sizeof(output) + 1U,
+                TCP_QUEUE_CAPACITY - 1U));
+
+    network_test_backend_clock_advance(1U);
+    /* Window update and probe become due together, but the update must stand alone. */
+    CHECK(tcp_recv(peer.handle, output + sizeof(output) - 1U, 1U, 0U) == 1);
+    CHECK(memcmp(output, data, sizeof(output)) == 0);
+    ack.window = sizeof(output);
+    CHECK(take(&peer, &gateway, ack) && net_poll(0U) == 1);
+    CHECK(take(&peer, &gateway, (struct wire_segment){
+        .seq = ack.seq, .ack = ack.ack, .window = ack.window,
+        .flags = ACK, .data = &outgoing, .length = 1U
+    }));
+    /* A peer that missed the update can now probe, and its byte is received once. */
+    CHECK(receive_later(&peer, inbound, 0U) && net_poll(0U) == 1);
+    ++ack.ack;
+    --ack.window;
+    CHECK(take(&peer, &gateway, ack)); /* Our probe did not move the pure ACK sequence. */
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, TCP_QUEUE_CAPACITY - sizeof(output) + 1U,
+                TCP_QUEUE_CAPACITY - 1U));
+    return dispose(&peer, 1);
+}
+
+static int persist_during_continuous_reads(void)
+{
+    static const unsigned char data[TCP_IPV4_DEFAULT_MSS] = {0xc1U};
+    static const unsigned char outgoing = 0x63U;
+    const struct tcp_stream *stream = &tcp_global_context.connection.stream;
+    struct peer peer;
+    struct wire_segment ack, inbound;
+    unsigned char output[sizeof(data)];
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, 31U, 0U, 64U));
+    CHECK(tcp_send(peer.handle, &outgoing, 1U, 0U) == 1);
+    inbound = (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .flags = ACK,
+        .data = data, .length = sizeof(data)
+    };
+    ack = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive + sizeof(data),
+        .window = TCP_QUEUE_CAPACITY - sizeof(data), .flags = ACK
+    };
+    CHECK(receive_later(&peer, inbound, 0U) && net_poll(0U) == 1 && take(&peer, &gateway, ack));
+    inbound.seq += sizeof(data);
+
+    /* Every read can advertise more credit and receive another full segment.
+     * Do not give the sender an extra poll with no ACK work. */
+    for (unsigned int now = 1000U; now < 3400U; now += 100U) {
+        network_test_backend_clock_set(now);
+        CHECK(receive_later(&peer, inbound, 0U));
+        CHECK(tcp_recv(peer.handle, output, sizeof(output), 0U) == (int)sizeof(output));
+        CHECK(memcmp(output, data, sizeof(output)) == 0);
+        ack.window = TCP_QUEUE_CAPACITY;
+        CHECK(take(&peer, &gateway, ack));
+        inbound.seq += sizeof(data);
+        ack.ack += sizeof(data);
+        ack.window -= sizeof(data);
+        if (now == 1000U || now == 3000U) {
+            struct wire_segment probe = ack;
+
+            probe.data = &outgoing;
+            probe.length = 1U;
+            CHECK(network_test_backend_transmit_time(0U) == now && take(&peer, &gateway, probe));
+            CHECK(stream->ack_pending); /* The probe did not replace the data ACK. */
+        } else {
+            CHECK(take(&peer, &gateway, ack));
+        }
+        CHECK(network_test_backend_transmit_count() == 0U);
+    }
+    CHECK(stream->flow.persist_wait_ms == 4000U && stream->rto.retries == 0U);
+    CHECK(state(&peer, TCP_STATE_ESTABLISHED, 0, sizeof(data), TCP_QUEUE_CAPACITY - 1U));
+    return dispose(&peer, 1);
+}
+
+static int persist_across_call_budgets(void)
+{
+    static const unsigned char data[TCP_IPV4_DEFAULT_MSS] = {0xc1U};
+    static const unsigned char outgoing = 0x63U;
+    const struct tcp_flow *flow = &tcp_global_context.connection.stream.flow;
+    struct peer peer;
+    struct wire_segment ack, inbound, probe;
+    unsigned char output[sizeof(data)];
+
+    CHECK(reset(0U, network.arp_cache_ttl_ms) && establish(&peer, 31U, 0U, 64U));
+    CHECK(tcp_send(peer.handle, &outgoing, 1U, 0U) == 1);
+    inbound = (struct wire_segment){
+        .seq = peer.first_receive, .ack = peer.first_send, .flags = ACK,
+        .data = data, .length = sizeof(data)
+    };
+    ack = (struct wire_segment){
+        .seq = peer.first_send, .ack = peer.first_receive,
+        .window = TCP_QUEUE_CAPACITY, .flags = ACK
+    };
+    for (unsigned int index = 0U; index < 3U; ++index) {
+        CHECK(receive_later(&peer, inbound, 0U) && net_poll(0U) == 1);
+        inbound.seq += sizeof(data);
+        ack.ack += sizeof(data);
+        ack.window -= sizeof(data);
+        CHECK(take(&peer, &gateway, ack));
+    }
+
+    /* The first call has enough budget for the ACK, not another frame. */
+    network_test_backend_clock_set(1000U);
+    network_test_backend_set_send_clock_step(1U);
+    CHECK(tcp_recv(peer.handle, output, sizeof(output), 1U) == (int)sizeof(output));
+    ack.window += sizeof(output);
+    CHECK(take(&peer, &gateway, ack) && net_clock_now_ms() == 1001U);
+    CHECK(network_test_backend_transmit_count() == 0U);
+
+    /* A probe deferred at the raw send gate must retain both its turn and timer. */
+    network_test_backend_set_clock_read_step(1U);
+    CHECK(tcp_recv(peer.handle, output, sizeof(output), 8U) == (int)sizeof(output));
+    network_test_backend_set_clock_read_step(0U);
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(!flow->probe_sent && flow->persist_started_ms == 0U && flow->persist_wait_ms == 1000U);
+
+    CHECK(tcp_recv(peer.handle, output, sizeof(output), 1U) == (int)sizeof(output));
+    probe = ack; /* The probe must not advertise the credit freed by the last two reads. */
+    probe.data = &outgoing;
+    probe.length = 1U;
+    CHECK(take(&peer, &gateway, probe) && network_test_backend_transmit_count() == 0U);
+    CHECK(flow->probe_sent && flow->persist_wait_ms == 2000U);
+    network_test_backend_set_send_clock_step(0U);
+    ack.window = TCP_QUEUE_CAPACITY;
+    CHECK(net_poll(0U) == 1 && take(&peer, &gateway, ack));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    return dispose(&peer, 1);
+}
+
+int test_tcp_stream(void)
+{
+    if (!ring_boundary() || !transmit_boundaries() || !receive_boundaries() ||
+        !wait_services_both_directions() || !wait_expiry_retains_progress() ||
+        !started_io_can_finish() || !deferred_raw_send_preserves_timers() ||
+        !wait_expiry_defers_control_replies() ||
+        !duplex_bytes() || !neighbor_during_stream() || !reset_challenge_rules() ||
+        !reset_challenge_neighbor_refresh() || !failure_and_reuse() ||
+        !read_progress_then_device_failure()) {
+        return 0;
+    }
+    puts("E4 bounded TCP queues, duplex byte streams and flow control: PASS");
+    if (!retry_of_timed_prefix() || !retry_after_neighbor_refresh() ||
+        !ack_releases_idle_neighbor() || !retry_exhaustion(RETRY_NO_ACK) ||
+        !retry_exhaustion(RETRY_DUPLICATE_ACK) || !retry_exhaustion(RETRY_ADVANCING_ACK) ||
+        !retry_exhaustion(RETRY_CLOSED_WINDOW) || !retry_exhaustion(RETRY_HARD_DEADLINE) ||
+        !raw_send_obeys_transmit_deadline() || !transmit_progress_deadline()) {
+        return 0;
+    }
+    puts("E5a TCP retransmission, ARP resumption and transmit deadlines: PASS");
+    if (!fast_recovery_on_wire() || !idle_restart_on_wire() ||
+        !idle_restart_with_outstanding(CONGESTION_SMSS, 0) ||
+        !idle_restart_with_outstanding(CONGESTION_SMSS / 2U, 0) ||
+        !idle_restart_with_outstanding(CONGESTION_SMSS, 1) ||
+        !timeout_loss_threshold_after_partial_ack() || !window_reports_and_rto() ||
+        !fast_retry_waits_for_neighbor(FAST_RESUME) || !fast_retry_waits_for_neighbor(FAST_CANCEL) ||
+        !fast_retry_waits_for_neighbor(FAST_RTO)) {
+        return 0;
+    }
+    puts("E5b pipelined TCP data, guarded fast recovery and RTO fallback: PASS");
+    if (!short_send_override() || !window_update_on_data() || !persist_new_probe(0) ||
+        !persist_new_probe(1) || !persist_preserves_loss_budget() ||
+        !persist_deadline_across_wrap() || !persist_waits_for_neighbor() ||
+        !persist_backoff_cap() || !persist_and_receive_credit() ||
+        !persist_during_continuous_reads() || !persist_across_call_budgets()) {
+        return 0;
+    }
+    puts("E5c bounded short sends, window credit and zero-window persist: PASS");
+    return 1;
+}

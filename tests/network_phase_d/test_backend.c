@@ -1,4 +1,4 @@
-#include "deterministic_backend.h"
+#include "../network_common/deterministic_backend.h"
 
 #include "../../transport/lib/net/internal.h"
 #include "../../transport/lib/net/net_platform.h"
@@ -66,11 +66,11 @@ static int test_device(void)
                  info.frame_max == NET_FRAME_MAX, "default frame bounds") ||
         !require(memcmp(info.mac, expected_mac, sizeof(expected_mac)) == 0,
                  "default MAC address") ||
-        !require(phase_d_backend_set_device_info(0) == SYS_ERR_INVALID,
+        !require(network_test_backend_set_device_info(0) == SYS_ERR_INVALID,
                  "null device configuration") ||
-        !require(phase_d_backend_set_next_info_error(0) == SYS_ERR_INVALID,
+        !require(network_test_backend_set_next_info_error(0) == SYS_ERR_INVALID,
                  "non-error device result") ||
-        !require(phase_d_backend_set_next_info_error(SYS_ERR_DEVICE) == 0,
+        !require(network_test_backend_set_next_info_error(SYS_ERR_DEVICE) == 0,
                  "device error injection") ||
         !require(net_get_info(&info) == SYS_ERR_DEVICE,
                  "injected device error") ||
@@ -80,7 +80,7 @@ static int test_device(void)
 
     info.state = NET_DEVICE_UNAVAILABLE;
     info.flags &= ~NET_DRIVER_FLAG_AVAILABLE;
-    if (!require(phase_d_backend_set_device_info(&info) == 0,
+    if (!require(network_test_backend_set_device_info(&info) == 0,
                  "custom device configuration")) {
         return 0;
     }
@@ -103,26 +103,26 @@ static int test_transmit(void)
     saved_first = frame[0];
     if (!require(net_send_frame(frame, sizeof(frame)) == (int)sizeof(frame),
                  "captured transmit") ||
-        !require(phase_d_backend_transmit_count() == 1U,
+        !require(network_test_backend_transmit_count() == 1U,
                  "transmit count") ||
-        !require(phase_d_backend_transmit_length(0U) == sizeof(frame),
+        !require(network_test_backend_transmit_length(0U) == sizeof(frame),
                  "transmit length") ||
-        !require(phase_d_backend_transmit_length(1U) == 0U,
+        !require(network_test_backend_transmit_length(1U) == 0U,
                  "invalid transmit length index")) {
         return 0;
     }
     frame[0] ^= 0xFFU;
-    if (!require(phase_d_backend_transmit_frame(0U)[0] == saved_first,
+    if (!require(network_test_backend_transmit_frame(0U)[0] == saved_first,
                  "synchronous transmit copy") ||
-        !require(phase_d_backend_transmit_frame(1U) == 0,
+        !require(network_test_backend_transmit_frame(1U) == 0,
                  "invalid transmit index") ||
-        !require(phase_d_backend_set_next_send_error(0) == SYS_ERR_INVALID,
+        !require(network_test_backend_set_next_send_error(0) == SYS_ERR_INVALID,
                  "non-error send result") ||
-        !require(phase_d_backend_set_next_send_error(SYS_ERR_TIMEOUT) == 0,
+        !require(network_test_backend_set_next_send_error(SYS_ERR_TIMEOUT) == 0,
                  "send error injection") ||
         !require(net_send_frame(frame, sizeof(frame)) == SYS_ERR_TIMEOUT,
                  "injected send error") ||
-        !require(phase_d_backend_transmit_count() == 1U,
+        !require(network_test_backend_transmit_count() == 1U,
                  "failed send not captured") ||
         !require(net_send_frame(0, sizeof(frame)) == SYS_ERR_INVALID,
                  "null send") ||
@@ -132,13 +132,13 @@ static int test_transmit(void)
                  "oversized send")) {
         return 0;
     }
-    phase_d_backend_clear_transmits();
-    if (!require(phase_d_backend_transmit_count() == 0U,
+    network_test_backend_clear_transmits();
+    if (!require(network_test_backend_transmit_count() == 0U,
                  "clear transmits")) {
         return 0;
     }
 
-    for (index = 0U; index < PHASE_D_BACKEND_QUEUE_CAPACITY; ++index) {
+    for (index = 0U; index < NETWORK_TEST_BACKEND_QUEUE_CAPACITY; ++index) {
         fill_frame(frame, sizeof(frame), index);
         if (!require(net_send_frame(frame, sizeof(frame)) ==
                          (int)sizeof(frame),
@@ -148,13 +148,13 @@ static int test_transmit(void)
     }
     if (!require(net_send_frame(frame, sizeof(frame)) == SYS_ERR_RANGE,
                  "transmit capture overflow") ||
-        !require(phase_d_backend_transmit_count() ==
-                     PHASE_D_BACKEND_QUEUE_CAPACITY,
+        !require(network_test_backend_transmit_count() ==
+                     NETWORK_TEST_BACKEND_QUEUE_CAPACITY,
                  "full transmit count")) {
         return 0;
     }
-    for (index = 0U; index < PHASE_D_BACKEND_QUEUE_CAPACITY; ++index) {
-        if (!require(phase_d_backend_transmit_frame(index)[0] ==
+    for (index = 0U; index < NETWORK_TEST_BACKEND_QUEUE_CAPACITY; ++index) {
+        if (!require(network_test_backend_transmit_frame(index)[0] ==
                          (unsigned char)index,
                      "transmit capture order")) {
             return 0;
@@ -175,12 +175,12 @@ static int test_receive(void)
                  "null receive") ||
         !require(net_recv_frame(output, NET_FRAME_MAX + 1U) == SYS_ERR_RANGE,
                  "oversized receive capacity") ||
-        !require(phase_d_backend_queue_receive(
+        !require(network_test_backend_queue_receive(
                      frame, NET_FRAME_MAX + 1U) == SYS_ERR_RANGE,
                  "oversized queued frame") ||
-        !require(phase_d_backend_queue_receive(frame, sizeof(frame)) == 0,
+        !require(network_test_backend_queue_receive(frame, sizeof(frame)) == 0,
                  "queue receive") ||
-        !require(phase_d_backend_pending_receive_count() == 1U,
+        !require(network_test_backend_pending_receive_count() == 1U,
                  "queued receive count")) {
         return 0;
     }
@@ -189,36 +189,36 @@ static int test_receive(void)
                  "receive copied frame") ||
         !require(memcmp(output, expected, sizeof(expected)) == 0,
                  "receive enqueue copy") ||
-        !require(phase_d_backend_pending_receive_count() == 0U,
+        !require(network_test_backend_pending_receive_count() == 0U,
                  "receive queue consumption")) {
         return 0;
     }
 
     fill_frame(frame, sizeof(frame), 0x50U);
-    if (!require(phase_d_backend_queue_receive(frame, sizeof(frame)) == 0,
+    if (!require(network_test_backend_queue_receive(frame, sizeof(frame)) == 0,
                  "queue capacity-drop frame") ||
         !require(net_recv_frame(output, NET_FRAME_MIN) == SYS_ERR_RANGE,
                  "capacity drop") ||
-        !require(phase_d_backend_pending_receive_count() == 0U,
+        !require(network_test_backend_pending_receive_count() == 0U,
                  "capacity drop consumption") ||
-        !require(phase_d_backend_queue_receive(frame, sizeof(frame)) == 0,
+        !require(network_test_backend_queue_receive(frame, sizeof(frame)) == 0,
                  "requeue receive") ||
         !require(net_recv_frame(output, sizeof(output)) == (int)sizeof(frame),
                  "receive frame") ||
         !require(memcmp(output, frame, sizeof(frame)) == 0,
                  "received frame contents") ||
-        !require(phase_d_backend_queue_receive_error(SYS_ERR_OVERRUN) == 0,
+        !require(network_test_backend_queue_receive_error(SYS_ERR_OVERRUN) == 0,
                  "queue receive error") ||
         !require(net_recv_frame(output, sizeof(output)) == SYS_ERR_OVERRUN,
                  "receive injected error") ||
         !require(net_recv_frame(output, sizeof(output)) == 0,
                  "empty receive queue") ||
-        !require(phase_d_backend_queue_receive(0, sizeof(frame)) ==
+        !require(network_test_backend_queue_receive(0, sizeof(frame)) ==
                      SYS_ERR_INVALID,
                  "null queued frame") ||
-        !require(phase_d_backend_queue_receive(frame, 0U) == SYS_ERR_RANGE,
+        !require(network_test_backend_queue_receive(frame, 0U) == SYS_ERR_RANGE,
                  "zero-length queued frame") ||
-        !require(phase_d_backend_queue_receive_error(0) == SYS_ERR_INVALID,
+        !require(network_test_backend_queue_receive_error(0) == SYS_ERR_INVALID,
                  "non-error receive event")) {
         return 0;
     }
@@ -231,20 +231,20 @@ static int test_platform(void)
     unsigned char first[8];
     unsigned char second[8];
 
-    phase_d_backend_clock_set(0xFFFFFFF0U);
-    phase_d_backend_clock_advance(32U);
+    network_test_backend_clock_set(0xFFFFFFF0U);
+    network_test_backend_clock_advance(32U);
     if (!require(net_clock_now_ms() == 0x00000010U, "wrapping clock")) {
         return 0;
     }
 
-    phase_d_backend_random_seed(123U);
+    network_test_backend_random_seed(123U);
     if (!require(net_random_bytes(0, 0U) == 0,
                  "zero-length random request") ||
         !require(net_random_bytes(first, sizeof(first)) == (int)sizeof(first),
                  "first random request")) {
         return 0;
     }
-    phase_d_backend_random_seed(123U);
+    network_test_backend_random_seed(123U);
     if (!require(net_random_bytes(second, sizeof(second)) ==
                      (int)sizeof(second),
                  "second random request") ||
@@ -261,13 +261,13 @@ static int test_platform(void)
         !require(cancellation.calls == 2U, "callback call count")) {
         return 0;
     }
-    phase_d_backend_set_cancelled(1);
+    network_test_backend_set_cancelled(1);
     cancellation.calls = 0U;
     if (!require(net_cancel_requested(), "forced cancellation") ||
         !require(cancellation.calls == 0U, "forced cancellation callback")) {
         return 0;
     }
-    phase_d_backend_set_cancelled(0);
+    network_test_backend_set_cancelled(0);
     net_set_cancel_callback(0, 0);
     return require(!net_cancel_requested(), "cleared cancellation");
 }
@@ -278,26 +278,26 @@ static int test_receive_queue_boundaries(void)
     unsigned char output[NET_FRAME_MAX];
     unsigned int index;
 
-    for (index = 0U; index < PHASE_D_BACKEND_QUEUE_CAPACITY; ++index) {
+    for (index = 0U; index < NETWORK_TEST_BACKEND_QUEUE_CAPACITY; ++index) {
         fill_frame(frame, sizeof(frame), index);
-        if (!require(phase_d_backend_queue_receive(frame, sizeof(frame)) == 0,
+        if (!require(network_test_backend_queue_receive(frame, sizeof(frame)) == 0,
                      "fill receive queue")) {
             return 0;
         }
     }
-    if (!require(phase_d_backend_queue_receive(frame, sizeof(frame)) ==
+    if (!require(network_test_backend_queue_receive(frame, sizeof(frame)) ==
                      SYS_ERR_RANGE,
                  "receive queue overflow") ||
-        !require(phase_d_backend_queue_receive_error(SYS_ERR_DEVICE) ==
+        !require(network_test_backend_queue_receive_error(SYS_ERR_DEVICE) ==
                      SYS_ERR_RANGE,
                  "receive error queue overflow") ||
-        !require(phase_d_backend_pending_receive_count() ==
-                     PHASE_D_BACKEND_QUEUE_CAPACITY,
+        !require(network_test_backend_pending_receive_count() ==
+                     NETWORK_TEST_BACKEND_QUEUE_CAPACITY,
                  "full receive count")) {
         return 0;
     }
 
-    for (index = 0U; index < PHASE_D_BACKEND_QUEUE_CAPACITY / 2U; ++index) {
+    for (index = 0U; index < NETWORK_TEST_BACKEND_QUEUE_CAPACITY / 2U; ++index) {
         if (!require(net_recv_frame(output, sizeof(output)) ==
                          (int)sizeof(frame),
                      "drain receive queue prefix") ||
@@ -306,22 +306,22 @@ static int test_receive_queue_boundaries(void)
             return 0;
         }
     }
-    for (index = PHASE_D_BACKEND_QUEUE_CAPACITY;
-         index < PHASE_D_BACKEND_QUEUE_CAPACITY * 3U / 2U; ++index) {
+    for (index = NETWORK_TEST_BACKEND_QUEUE_CAPACITY;
+         index < NETWORK_TEST_BACKEND_QUEUE_CAPACITY * 3U / 2U; ++index) {
         fill_frame(frame, sizeof(frame), index);
-        if (!require(phase_d_backend_queue_receive(frame, sizeof(frame)) == 0,
+        if (!require(network_test_backend_queue_receive(frame, sizeof(frame)) == 0,
                      "wrap receive queue")) {
             return 0;
         }
     }
-    if (!require(phase_d_backend_pending_receive_count() ==
-                     PHASE_D_BACKEND_QUEUE_CAPACITY,
+    if (!require(network_test_backend_pending_receive_count() ==
+                     NETWORK_TEST_BACKEND_QUEUE_CAPACITY,
                  "wrapped receive count")) {
         return 0;
     }
 
-    for (index = PHASE_D_BACKEND_QUEUE_CAPACITY / 2U;
-         index < PHASE_D_BACKEND_QUEUE_CAPACITY * 3U / 2U; ++index) {
+    for (index = NETWORK_TEST_BACKEND_QUEUE_CAPACITY / 2U;
+         index < NETWORK_TEST_BACKEND_QUEUE_CAPACITY * 3U / 2U; ++index) {
         if (!require(net_recv_frame(output, sizeof(output)) ==
                          (int)sizeof(frame),
                      "drain wrapped receive queue") ||
@@ -330,15 +330,15 @@ static int test_receive_queue_boundaries(void)
             return 0;
         }
     }
-    return require(phase_d_backend_pending_receive_count() == 0U,
+    return require(network_test_backend_pending_receive_count() == 0U,
                    "empty wrapped receive queue");
 }
 
 int main(void)
 {
-    phase_d_backend_reset();
-    if (!require(strcmp(phase_d_backend_marker(),
-                        "MINI_OS_PHASE_D_DETERMINISTIC_BACKEND_ONLY") == 0,
+    network_test_backend_reset();
+    if (!require(strcmp(network_test_backend_marker(),
+                        "MINI_OS_NETWORK_DETERMINISTIC_BACKEND_ONLY") == 0,
                  "test-only marker") ||
         !require(sizeof(net_u8) == 1U && sizeof(net_u16) == 2U &&
                  sizeof(net_u32) == 4U, "private integer widths") ||
@@ -349,19 +349,19 @@ int main(void)
         return 1;
     }
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     if (!test_transmit()) {
         return 1;
     }
-    phase_d_backend_reset();
+    network_test_backend_reset();
     if (!test_receive()) {
         return 1;
     }
-    phase_d_backend_reset();
+    network_test_backend_reset();
     if (!test_platform()) {
         return 1;
     }
-    phase_d_backend_reset();
+    network_test_backend_reset();
     if (!test_receive_queue_boundaries()) {
         return 1;
     }

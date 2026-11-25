@@ -30,6 +30,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - Complete IDT with fatal exception diagnostics, remapped 8259 IRQs, a dedicated interrupt stack, and PIT IRQ0 monotonic timekeeping
 - Polling NE2000 raw Ethernet transport with bounded Remote DMA, transmit, receive-ring, overrun, reset, and unavailable-device paths
 - Application-linked modern-C Ethernet II, ARP, static IPv4, and ICMP Echo with a strict-C90 `ping` application
+- Application-linked IPv4 TCP with one resumable active open, secure ISN generation, and bounded bidirectional byte streams with congestion control, loss recovery, and zero-window probing
 - `int 0x80` System Call Engine for console, heap, file, cursor, monotonic-clock, nonblocking-key, RDRAND-backed secure-random, and raw-frame services
 - FAT-chain executable loader (`run <file>`) for flat binaries up to 512 KiB at `0x00100000`
 - Modern-C runtime implementation with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
@@ -47,6 +48,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
   - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`, `netdiag.c`, `ping.c`)
   - `transport/lib_test/`: strict C90 executable tests, including BSS coverage
   - `transport/build/`: compiled flat output binaries (`apps/*.bin`, `lib_test/*.bin`)
+- `downloads/mbedtls/`: Git-ignored cache for the pinned SHA-256/HMAC build inputs
 - `docs/`: project documentation
 - `build/`: generated kernel binaries and disk image
 
@@ -57,17 +59,19 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - `clang` for the freestanding modern-C runtime and strict-C90 apps/tests
 - `ld.lld` when available; otherwise the built-in `elf2bin` path is used
 - `qemu-system-i386`
-- Python 3.9 or newer for automated tests
+- Python 3.9 or newer to fetch build dependencies and run automated tests
 - standard shell tools used by `Makefile` (`awk`, `dd`, `expr`, `find`, `grep`, `mkdir`, `printf`, `rm`, `tr`, `wc`)
 - `bash`, `git`, `nm`, and `objdump` for the optional pinned network feasibility build, plus `patch` for its optional host heap probe
 
 ## Build and Run
 
 ```bash
-make clean
+make deps
 make
 make run
 ```
+
+`make deps` prepares the pinned Mbed TLS source cache for TCP. After setup, ordinary builds work offline. See [Build and Run](docs/Build_and_Run.md#3-build-commands) to use a local source tree instead.
 
 Build artifacts:
 
@@ -128,6 +132,7 @@ The generated image is exactly 4,471 sectors (2,289,152 bytes).
 - Filesystem design draft: `docs/DIY-FS.md`
 - Complete system call ABI: `docs/Syscall_ABI.md`
 - Raw Ethernet transport: `docs/Network_Raw_Transport.md`
+- Application-linked network stack: `docs/Network_Stack.md`
 - Runtime support matrix: `docs/Library_Support.md`
 - Automated testing: `docs/Testing.md`
 - Real hardware boot guide: `docs/Real_Hardware_Guide.md`

@@ -1,4 +1,4 @@
-#include "deterministic_backend.h"
+#include "../network_common/deterministic_backend.h"
 
 #include "../../transport/lib/net/arp.h"
 #include "../../transport/lib/net/byteorder.h"
@@ -45,7 +45,7 @@ static int initialize(void)
         NET_ARP_RETRY_COUNT_DEFAULT
     };
 
-    phase_d_backend_reset();
+    network_test_backend_reset();
     memset(&net_global_context, 0, sizeof(net_global_context));
     return require(net_init(&config) == 0, "initialize stack");
 }
@@ -131,7 +131,7 @@ static int queue_echo(const struct net_ipv4_addr *source,
                                           0U, identifier, sequence,
                                           payload, payload_length);
 
-    return require(phase_d_backend_queue_receive(frame, length) == 0,
+    return require(network_test_backend_queue_receive(frame, length) == 0,
                    "queue Echo Reply");
 }
 
@@ -389,10 +389,10 @@ static int test_icmp_decode_and_send(void)
                  "send odd-length Echo Request")) {
         return 0;
     }
-    sent = phase_d_backend_transmit_frame(0U);
+    sent = network_test_backend_transmit_frame(0U);
     ip = (unsigned char *)sent + NET_ETHERNET_HEADER_SIZE;
     icmp = ip + NET_IPV4_HEADER_SIZE;
-    if (!require(phase_d_backend_transmit_length(0U) == NET_FRAME_MIN &&
+    if (!require(network_test_backend_transmit_length(0U) == NET_FRAME_MIN &&
                  memcmp(sent, gateway_mac.octets, 6U) == 0 &&
                  memcmp(sent + 6U, local_mac.octets, 6U) == 0 &&
                  net_read_be16(sent + 12U) == NET_ETHERTYPE_IPV4 &&
@@ -421,11 +421,11 @@ static int test_icmp_decode_and_send(void)
                                        &gateway_mac, 1U, 2U,
                                        maximum_payload,
                                        sizeof(maximum_payload)) == 0 &&
-                 phase_d_backend_transmit_length(1U) == NET_FRAME_MAX,
+                 network_test_backend_transmit_length(1U) == NET_FRAME_MAX,
                  "maximum Echo payload fits one full Ethernet frame")) {
         return 0;
     }
-    sent = phase_d_backend_transmit_frame(1U);
+    sent = network_test_backend_transmit_frame(1U);
     ip = (unsigned char *)sent + NET_ETHERNET_HEADER_SIZE;
     icmp = ip + NET_IPV4_HEADER_SIZE;
     return require(net_read_be16(ip + 2U) == NET_IPV4_MTU &&
@@ -455,9 +455,9 @@ static int test_echo_server(void)
                               &gateway_ip, &local_ip, 8U, 7U, 9U,
                               "A", 1U);
     frame[NET_ETHERNET_HEADER_SIZE + NET_IPV4_HEADER_SIZE + 8U] ^= 1U;
-    if (!require(phase_d_backend_queue_receive(frame, length) == 0 &&
+    if (!require(network_test_backend_queue_receive(frame, length) == 0 &&
                  net_poll(0U) == 0 &&
-                 phase_d_backend_transmit_count() == 0U &&
+                 network_test_backend_transmit_count() == 0U &&
                  net_global_context.counters.malformed_frames == 1U,
                  "corrupt request does not receive a reply")) {
         return 0;
@@ -465,17 +465,17 @@ static int test_echo_server(void)
     length = make_echo_frame(frame, &local_mac, &gateway_mac,
                               &gateway_ip, &local_ip, 8U, 7U, 9U,
                               "A", 1U);
-    if (!require(phase_d_backend_queue_receive(frame, length) == 0 &&
+    if (!require(network_test_backend_queue_receive(frame, length) == 0 &&
                  net_poll(0U) == 1 &&
-                 phase_d_backend_transmit_count() == 1U &&
+                 network_test_backend_transmit_count() == 1U &&
                  net_global_context.counters.echo_requests == 1U,
                  "valid request receives one reply")) {
         return 0;
     }
-    sent = phase_d_backend_transmit_frame(0U);
+    sent = network_test_backend_transmit_frame(0U);
     ip = sent + NET_ETHERNET_HEADER_SIZE;
     icmp = ip + NET_IPV4_HEADER_SIZE;
-    return require(phase_d_backend_transmit_length(0U) == NET_FRAME_MIN &&
+    return require(network_test_backend_transmit_length(0U) == NET_FRAME_MIN &&
                    memcmp(sent, gateway_mac.octets, 6U) == 0 &&
                    memcmp(ip + 12U, local_ip.octets, 4U) == 0 &&
                    memcmp(ip + 16U, gateway_ip.octets, 4U) == 0 &&
@@ -512,7 +512,7 @@ static int test_ping_match(void)
         !queue_echo(&gateway_ip, identifier, 5U, payload, 3U)) {
         return 0;
     }
-    phase_d_backend_set_receive_clock_step(10U);
+    network_test_backend_set_receive_clock_step(10U);
     memset(&result, 0xA5, sizeof(result));
     if (!require(net_ping(&gateway_ip, 5U, payload, 3U,
                            100U, &result) == 0 &&
@@ -521,17 +521,17 @@ static int test_ping_match(void)
                  result.elapsed_ms == 60U &&
                  memcmp(result.source.octets,
                         gateway_ip.octets, 4U) == 0 &&
-                 phase_d_backend_transmit_count() == 1U &&
+                 network_test_backend_transmit_count() == 1U &&
                  net_global_context.counters.echo_replies == 6U &&
                  !net_global_context.pending_echo.active &&
                  !net_global_context.service_active,
                  "only fully matching Echo Reply completes Ping")) {
         return 0;
     }
-    length = phase_d_backend_transmit_length(0U);
+    length = network_test_backend_transmit_length(0U);
     return require(length == NET_FRAME_MIN &&
-                   phase_d_backend_transmit_frame(0U)[34] == 8U &&
-                   net_read_be16(phase_d_backend_transmit_frame(0U) +
+                   network_test_backend_transmit_frame(0U)[34] == 8U &&
+                   net_read_be16(network_test_backend_transmit_frame(0U) +
                                   38U) == identifier,
                    "Ping sends the selected identifier and payload");
 }
@@ -558,11 +558,11 @@ static int test_deadlines_and_zero(void)
         !queue_echo(&gateway_ip, identifier, 99U, 0, 0U)) {
         return 0;
     }
-    phase_d_backend_set_receive_clock_step(10U);
+    network_test_backend_set_receive_clock_step(10U);
     if (!require(net_ping(&gateway_ip, 1U, 0, 0U, 25U,
                            &result) == NET_ERR_TIMEOUT &&
                  memcmp(&result, &sentinel, sizeof(result)) == 0 &&
-                 phase_d_backend_transmit_count() == 1U &&
+                 network_test_backend_transmit_count() == 1U &&
                  !net_global_context.pending_echo.active &&
                  !net_global_context.service_active &&
                  net_global_context.counters.received_frames == 3U,
@@ -575,27 +575,27 @@ static int test_deadlines_and_zero(void)
     memset(&result, 0xA5, sizeof(result));
     sentinel = result;
     make_gateway_arp_reply(frame);
-    if (!require(phase_d_backend_queue_receive(frame, NET_FRAME_MIN) == 0 &&
+    if (!require(network_test_backend_queue_receive(frame, NET_FRAME_MIN) == 0 &&
                  net_ping(&gateway_ip, 1U, 0, 0U, 0U,
                            &result) == NET_ERR_TIMEOUT &&
                  memcmp(&result, &sentinel, sizeof(result)) == 0 &&
-                 phase_d_backend_transmit_count() == 1U &&
-                 net_read_be16(phase_d_backend_transmit_frame(0U) + 12U) ==
+                 network_test_backend_transmit_count() == 1U &&
+                 net_read_be16(network_test_backend_transmit_frame(0U) + 12U) ==
                      NET_ETHERTYPE_ARP,
                  "zero timeout spends one receive opportunity on ARP")) {
         return 0;
     }
-    phase_d_backend_clear_transmits();
+    network_test_backend_clear_transmits();
     identifier = (net_u16)(net_global_context.next_echo_identifier + 1U);
     length = make_echo_frame(frame, &local_mac, &gateway_mac,
                               &gateway_ip, &local_ip, 0U,
                               identifier, 2U, 0, 0U);
-    return require(phase_d_backend_queue_receive(frame, length) == 0 &&
+    return require(network_test_backend_queue_receive(frame, length) == 0 &&
                    net_ping(&gateway_ip, 2U, 0, 0U, 0U,
                              &result) == 0 &&
                    result.sequence == 2U &&
-                   phase_d_backend_transmit_count() == 1U &&
-                   net_read_be16(phase_d_backend_transmit_frame(0U) + 12U) ==
+                   network_test_backend_transmit_count() == 1U &&
+                   net_read_be16(network_test_backend_transmit_frame(0U) + 12U) ==
                        NET_ETHERTYPE_IPV4,
                    "zero timeout cache hit allows one Echo receive");
 }
@@ -615,25 +615,25 @@ static int test_arp_and_echo_share_deadline(void)
     sentinel = result;
     identifier = (net_u16)(net_global_context.next_echo_identifier + 1U);
     make_gateway_arp_reply(frame);
-    if (!require(phase_d_backend_queue_receive(frame, NET_FRAME_MIN) == 0,
+    if (!require(network_test_backend_queue_receive(frame, NET_FRAME_MIN) == 0,
                  "queue ARP Reply before Ping")) {
         return 0;
     }
     length = make_echo_frame(frame, &local_mac, &gateway_mac,
                               &gateway_ip, &local_ip, 0U,
                               identifier, 1U, 0, 0U);
-    if (!require(phase_d_backend_queue_receive(frame, length) == 0,
+    if (!require(network_test_backend_queue_receive(frame, length) == 0,
                  "queue Echo Reply after ARP")) {
         return 0;
     }
-    phase_d_backend_set_receive_clock_step(20U);
+    network_test_backend_set_receive_clock_step(20U);
     return require(net_ping(&gateway_ip, 1U, 0, 0U,
                              30U, &result) == NET_ERR_TIMEOUT &&
                    memcmp(&result, &sentinel, sizeof(result)) == 0 &&
-                   phase_d_backend_transmit_count() == 2U &&
-                   net_read_be16(phase_d_backend_transmit_frame(0U) + 12U) ==
+                   network_test_backend_transmit_count() == 2U &&
+                   net_read_be16(network_test_backend_transmit_frame(0U) + 12U) ==
                        NET_ETHERTYPE_ARP &&
-                   net_read_be16(phase_d_backend_transmit_frame(1U) + 12U) ==
+                   net_read_be16(network_test_backend_transmit_frame(1U) + 12U) ==
                        NET_ETHERTYPE_IPV4 &&
                    !net_global_context.service_active &&
                    !net_global_context.pending_echo.active,
@@ -680,7 +680,7 @@ static int test_late_reply_and_wait_cancellation(void)
     if (!queue_echo(&gateway_ip, identifier, 1U, 0, 0U)) {
         return 0;
     }
-    phase_d_backend_set_receive_clock_step(30U);
+    network_test_backend_set_receive_clock_step(30U);
     if (!require(net_ping(&gateway_ip, 1U, 0, 0U,
                            20U, &result) == NET_ERR_TIMEOUT &&
                  net_global_context.counters.received_frames == 1U &&
@@ -703,7 +703,7 @@ static int test_late_reply_and_wait_cancellation(void)
     net_set_cancel_callback(cancel_after_calls, &probe);
     if (!require(net_ping(&gateway_ip, 1U, 0, 0U,
                            100U, &result) == NET_ERR_CANCELLED &&
-                 phase_d_backend_transmit_count() == 1U &&
+                 network_test_backend_transmit_count() == 1U &&
                  !net_global_context.service_active &&
                  !net_global_context.pending_echo.active &&
                  memcmp(&result, &sentinel, sizeof(result)) == 0,
@@ -726,7 +726,7 @@ static int test_late_reply_and_wait_cancellation(void)
     probe.calls = 0U;
     probe.limit = 4U;
     net_set_cancel_callback(cancel_on_one_call, &probe);
-    phase_d_backend_set_receive_clock_step(10U);
+    network_test_backend_set_receive_clock_step(10U);
     return require(net_ping(&gateway_ip, 1U, 0, 0U,
                              20U, &result) == NET_ERR_CANCELLED &&
                    probe.calls == 4U &&
@@ -749,7 +749,7 @@ static int test_one_shot_poll_and_arp_cancellation(void)
     length = make_echo_frame(frame, &local_mac, &gateway_mac,
                               &gateway_ip, &local_ip, 8U, 1U, 1U,
                               0, 0U);
-    if (!require(phase_d_backend_queue_receive(frame, length) == 0,
+    if (!require(network_test_backend_queue_receive(frame, length) == 0,
                  "queue Echo Request before one-shot poll cancel")) {
         return 0;
     }
@@ -760,7 +760,7 @@ static int test_one_shot_poll_and_arp_cancellation(void)
                  probe.calls == 2U &&
                  net_global_context.counters.received_frames == 1U &&
                  net_global_context.counters.echo_requests == 0U &&
-                 phase_d_backend_transmit_count() == 0U &&
+                 network_test_backend_transmit_count() == 0U &&
                  !net_global_context.service_active,
                  "one-shot cancellation reaches public polling result")) {
         return 0;
@@ -770,7 +770,7 @@ static int test_one_shot_poll_and_arp_cancellation(void)
         return 0;
     }
     make_gateway_arp_reply(frame);
-    if (!require(phase_d_backend_queue_receive(frame, NET_FRAME_MIN) == 0,
+    if (!require(network_test_backend_queue_receive(frame, NET_FRAME_MIN) == 0,
                  "queue ARP Reply before one-shot resolve cancel")) {
         return 0;
     }
@@ -781,7 +781,7 @@ static int test_one_shot_poll_and_arp_cancellation(void)
                        NET_ERR_CANCELLED &&
                    probe.calls == 3U &&
                    net_global_context.counters.received_frames == 1U &&
-                   phase_d_backend_transmit_count() == 1U &&
+                   network_test_backend_transmit_count() == 1U &&
                    memcmp(output.octets, broadcast_mac.octets, 6U) == 0 &&
                    !net_global_context.pending_arp.active &&
                    !net_global_context.service_active,
@@ -815,7 +815,7 @@ static int test_offlink_wrap_and_errors(void)
                  "invalid input and no route preserve result")) {
         return 0;
     }
-    phase_d_backend_clock_set(UINT_MAX - 5U);
+    network_test_backend_clock_set(UINT_MAX - 5U);
     if (!require(net_arp_cache_store(&net_global_context,
                                      &gateway_ip, &gateway_mac) == 0,
                  "prime gateway across clock wrap")) {
@@ -825,13 +825,13 @@ static int test_offlink_wrap_and_errors(void)
     if (!queue_echo(&remote_ip, identifier, 3U, "xy", 2U)) {
         return 0;
     }
-    phase_d_backend_set_receive_clock_step(10U);
+    network_test_backend_set_receive_clock_step(10U);
     if (!require(net_ping(&remote_ip, 3U, "xy", 2U,
                            20U, &result) == 0 &&
                  result.elapsed_ms == 10U &&
                  memcmp(result.source.octets,
                         remote_ip.octets, 4U) == 0 &&
-                 memcmp(phase_d_backend_transmit_frame(0U),
+                 memcmp(network_test_backend_transmit_frame(0U),
                         gateway_mac.octets, 6U) == 0,
                  "off-link Ping uses gateway and accepts remote source")) {
         return 0;
@@ -844,17 +844,17 @@ static int test_offlink_wrap_and_errors(void)
     }
     memset(&result, 0xA5, sizeof(result));
     sentinel = result;
-    phase_d_backend_set_cancelled(1);
+    network_test_backend_set_cancelled(1);
     if (!require(net_ping(&gateway_ip, 1U, 0, 0U,
                            10U, &result) == NET_ERR_CANCELLED &&
-                 phase_d_backend_transmit_count() == 0U &&
+                 network_test_backend_transmit_count() == 0U &&
                  !net_global_context.service_active &&
                  memcmp(&result, &sentinel, sizeof(result)) == 0,
                  "cancellation leaves result and state unchanged")) {
         return 0;
     }
-    phase_d_backend_set_cancelled(0);
-    phase_d_backend_set_next_send_error(SYS_ERR_UNAVAILABLE);
+    network_test_backend_set_cancelled(0);
+    network_test_backend_set_next_send_error(SYS_ERR_UNAVAILABLE);
     return require(net_ping(&gateway_ip, 1U, 0, 0U,
                              10U, &result) == NET_ERR_UNAVAILABLE &&
                    !net_global_context.pending_echo.active &&

@@ -14,7 +14,8 @@ from typing import Optional
 
 from qemu_e2e import VirtualMachine, check_image, prepare_debug_image
 from qemu_packet_socket import (
-    connect_peer, network_args, recv_frame, reserve_port, send_frame,
+    arp_frame, checksum, connect_peer, ethernet, network_args, recv_frame,
+    reserve_port, send_frame,
 )
 
 
@@ -35,30 +36,6 @@ OPERATION_TIMEOUT = 16.0
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
-
-
-def checksum(data: bytes) -> int:
-    if len(data) & 1:
-        data += b"\x00"
-    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
-    while total > 0xFFFF:
-        total = (total & 0xFFFF) + (total >> 16)
-    return (~total) & 0xFFFF
-
-
-def ethernet(destination: bytes, source: bytes, kind: int,
-             payload: bytes, padding: int = 0) -> bytes:
-    frame = destination + source + struct.pack("!H", kind) + payload
-    return frame.ljust(60, bytes((padding,)))
-
-
-def arp_frame(operation: int, destination: bytes, source: bytes,
-              sender_ip: bytes, target_mac: bytes, target_ip: bytes,
-              sender_mac: Optional[bytes] = None) -> bytes:
-    sender = source if sender_mac is None else sender_mac
-    payload = struct.pack("!HHBBH", 1, 0x0800, 6, 4, operation)
-    payload += sender + sender_ip + target_mac + target_ip
-    return ethernet(destination, source, 0x0806, payload)
 
 
 def expected_arp_request() -> bytes:

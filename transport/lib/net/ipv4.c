@@ -64,7 +64,9 @@ int net_ipv4_decode(const struct net_context *context,
                context->device_mac.octets, 6U) != 0 ||
         memcmp(parsed.destination.octets,
                context->config.address.octets, 4U) != 0 ||
-        ip[9] != NET_IPV4_PROTOCOL_ICMP) {
+        (ip[9] != NET_IPV4_PROTOCOL_ICMP &&
+         (context->transport.owner == 0 ||
+          ip[9] != context->transport.protocol))) {
         return NET_IPV4_UNSUPPORTED;
     }
     parsed.payload = ip + header_length;
@@ -92,20 +94,27 @@ int net_ipv4_handle(struct net_context *context,
     if (classification < 0) {
         return classification;
     }
-    return net_icmp_handle(context, ethernet, &packet);
+    if (packet.protocol == NET_IPV4_PROTOCOL_ICMP) {
+        return net_icmp_handle(context, ethernet, &packet);
+    }
+    return context->transport.input(context->transport.owner, ethernet,
+                                     &packet);
 }
 
 int net_ipv4_send(struct net_context *context,
                   const struct net_ipv4_addr *destination,
                   const struct net_mac_addr *next_hop_mac,
-                  net_u8 protocol, unsigned int payload_length)
+                  net_u8 protocol, unsigned int payload_length,
+                  const struct net_tx_deadline *deadline)
 {
     struct net_ipv4_addr selected_hop;
     unsigned char *ip;
 
     if (context == 0 || destination == 0 || next_hop_mac == 0 ||
         payload_length > NET_IPV4_PAYLOAD_MAX ||
-        protocol != NET_IPV4_PROTOCOL_ICMP) {
+        (protocol != NET_IPV4_PROTOCOL_ICMP &&
+         (context->transport.owner == 0 ||
+          protocol != context->transport.protocol))) {
         return NET_ERR_INVALID;
     }
     if (!context->initialized || !context->tx_prepared) {
@@ -129,6 +138,6 @@ int net_ipv4_send(struct net_context *context,
     memcpy(ip + 16U, destination->octets, 4U);
     net_write_be16(ip + 10U,
                    net_checksum_compute(ip, NET_IPV4_HEADER_SIZE));
-    return net_ethernet_send(context, next_hop_mac, NET_ETHERTYPE_IPV4,
-                             NET_IPV4_HEADER_SIZE + payload_length);
+    return net_ethernet_send_before(context, next_hop_mac, NET_ETHERTYPE_IPV4,
+                                    NET_IPV4_HEADER_SIZE + payload_length, deadline);
 }

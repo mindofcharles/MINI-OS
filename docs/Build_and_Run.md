@@ -12,7 +12,7 @@ Required tools:
 - `ld.lld` when available; otherwise the checked `elf2bin` fallback is selected
 - `qemu-system-i386`
 - shell tools used by `Makefile` (`awk`, `dd`, `expr`, `find`, `grep`, `mkdir`, `printf`, `rm`, `tr`, `wc`)
-- Python 3.9 or newer for the automated build and QEMU tests
+- Python 3.9 or newer to fetch build dependencies and run the automated build and QEMU tests
 
 ## 2. Source and Output Paths
 
@@ -38,12 +38,26 @@ Build outputs:
 
 ## 3. Build Commands
 
-From project root:
+From the project root, prepare the dependency once and then build.
 
 ```bash
-make clean
+make deps
 make
 ```
+
+`make deps` downloads `mbedtls-3.6.7.tar.bz2` from the [official Mbed TLS release](https://github.com/Mbed-TLS/mbedtls/releases/tag/mbedtls-3.6.7) and checks its SHA-256 against the pin in the Makefile before opening it. It extracts only the required HMAC sources, headers, and license, then verifies their bytes against [the pinned file checksums](../tools/mbedtls_files.sha256) before publishing the cache.
+
+The cache under `downloads/mbedtls/` is excluded from Git and filesystem injection, and `make clean` preserves it. Repeating `make deps` rechecks the cached files without downloading. Plain `make` uses the prepared cache without fetching or rehashing it.
+
+To reuse a local checkout of the supported version, set `MBEDTLS_SOURCE` to the root of that source tree. The same override works with `make test`.
+
+```bash
+make MBEDTLS_SOURCE=/path/to/mbedtls
+```
+
+The build rejects paths with spaces in `MBEDTLS_SOURCE` before expanding its dependencies.
+
+Switching source trees rebuilds affected crypto objects, TCP binaries, host tests, and the image as each is requested, even when the source files have identical timestamps. The origin records live under `build/` and are not injected into the guest filesystem.
 
 What happens:
 
@@ -82,7 +96,7 @@ Objects retain their source path below `build/transport/`, so an application and
 
 ### Optional Network Feasibility Build
 
-The optional network feasibility build uses clean external checkouts at fixed commits and never downloads or links them into the normal image.
+The optional network feasibility build uses separate clean external checkouts at fixed commits. It does not feed the normal build.
 
 ```bash
 make network-phase0-check
@@ -96,7 +110,7 @@ make network-phase0 \
 
 The pinned revisions, probe configuration, generated outputs, and host-probe procedure are documented with the reproducible tooling in [`tools/network_phase0/README.md`](../tools/network_phase0/README.md).
 
-The deterministic network regressions run entirely on the host and do not require external sources:
+The deterministic network regressions run entirely on the host and use the same prepared Mbed TLS sources as the TCP build.
 
 ```bash
 make test-network-host

@@ -15,6 +15,17 @@ enum net_ethernet_class {
     NET_ETHERNET_IPV4 = 2
 };
 
+/* Neither result starts raw transmit. Only caller deferral is resumable. */
+enum {
+    NET_ETHERNET_TX_DEFERRED = 256,
+    NET_ETHERNET_TX_EXPIRED = 257
+};
+
+struct net_tx_deadline {
+    net_u32 started_ms;
+    unsigned int timeout_ms;
+};
+
 struct net_ethernet_view {
     struct net_mac_addr destination;
     struct net_mac_addr source;
@@ -31,9 +42,14 @@ int net_ethernet_decode(struct net_context *context, unsigned int frame_length,
 /* Begin clears the frame and returns space after its header. */
 unsigned char *net_ethernet_begin_tx(struct net_context *context);
 
-/* Send consumes one prepared frame, even if the raw driver reports an error. */
+/* Send consumes one prepared frame even if deferred or the driver fails. */
 int net_ethernet_send(struct net_context *context,
                       const struct net_mac_addr *destination,
                       net_u16 ethertype, unsigned int payload_length);
+/* A non-null protocol deadline is checked alongside the caller's wait. */
+int net_ethernet_send_before(struct net_context *context,
+                             const struct net_mac_addr *destination,
+                             net_u16 ethertype, unsigned int payload_length,
+                             const struct net_tx_deadline *deadline);
 
 #endif
