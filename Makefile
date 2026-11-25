@@ -49,7 +49,7 @@ COMPILER_RT_OBJ := $(BUILD_DIR)/compiler_rt.o
 NET_BASE_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,raw.c platform.c time.c)
 NET_PHASE_D2_LIB_SRCS := $(addprefix $(LIB_DIR)/net/,net.c address.c byteorder.c checksum.c)
 NET_IPV4_LIB_SRCS := $(NET_PHASE_D2_LIB_SRCS) $(addprefix $(LIB_DIR)/net/,ethernet.c arp.c ipv4.c icmp.c service.c poll.c)
-NET_TCP_LIB_SRCS := $(addprefix $(LIB_DIR)/net/tcp/,api.c connection.c timers.c codec.c sequence.c isn.c open.c queue.c output.c stream.c rto.c congestion.c)
+NET_TCP_LIB_SRCS := $(addprefix $(LIB_DIR)/net/tcp/,api.c connection.c timers.c codec.c sequence.c isn.c open.c queue.c output.c stream.c rto.c congestion.c flow.c)
 NET_SHARED_CRYPTO_LIB_SRCS := $(addprefix $(LIB_DIR)/crypto/,clear.c hmac_sha256.c)
 
 # Official Mbed TLS release asset. The source commit is in tools/mbedtls_files.sha256.

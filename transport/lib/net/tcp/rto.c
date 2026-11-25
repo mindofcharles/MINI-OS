@@ -9,7 +9,7 @@ enum {
     TCP_RTT_AMBIGUOUS
 };
 
-static void arm(struct tcp_rto *rto, net_u32 right, net_u32 now_ms)
+void tcp_rto_rearm(struct tcp_rto *rto, net_u32 right, net_u32 now_ms)
 {
     rto->timer_started_ms = now_ms;
     /* Only bytes already sent at the time of this arm are eligible at expiry. */
@@ -54,7 +54,7 @@ void tcp_rto_new_data(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms,
                       int start_timer)
 {
     if (start_timer) {
-        arm(rto, right, sent_ms);
+        tcp_rto_rearm(rto, right, sent_ms);
     }
     if (rto->sample_state == TCP_RTT_NONE) {
         rto->sample_state = TCP_RTT_CANDIDATE;
@@ -63,13 +63,18 @@ void tcp_rto_new_data(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms,
     }
 }
 
-static void note_retransmission(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms)
+void tcp_rto_mark_ambiguous(struct tcp_rto *rto, net_u32 right)
 {
     /* An ACK covering this flight might have been prompted by the retry.
      * Wait for fresh data after it before timing another RTT. */
     rto->sample_state = TCP_RTT_AMBIGUOUS;
     rto->sample_right = right;
-    arm(rto, right, sent_ms);
+}
+
+static void note_retransmission(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms)
+{
+    tcp_rto_mark_ambiguous(rto, right);
+    tcp_rto_rearm(rto, right, sent_ms);
 }
 
 void tcp_rto_retransmitted(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms)
@@ -101,5 +106,5 @@ void tcp_rto_acknowledged(struct tcp_rto *rto, net_u32 ack, unsigned int flight,
     }
     rto->retries = 0U;
     /* A zero flight disarms the timer; the next new send arms it again. */
-    arm(rto, ack + flight, now_ms);
+    tcp_rto_rearm(rto, ack + flight, now_ms);
 }

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Exercise TCP active open, byte streams and loss recovery with a QEMU peer."""
+"""Exercise TCP active open, streams, loss recovery and flow control in QEMU."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from select import select
 import shutil
 import socket
 import struct
@@ -28,11 +29,13 @@ PEER_PORT = 22
 PEER_SEQUENCE = 0xFFFFFFFF
 SYN, RST, PSH, ACK = 0x02, 0x04, 0x08, 0x10
 GUEST_MSS = bytes.fromhex("02 04 02 18")
+GUEST_RMSS = 536
 PEER_MSS = bytes.fromhex("02 04 05 b4")
 STREAM_MSS = bytes.fromhex("02 04 01 37")
 QUEUE_CAPACITY = 4096
 STREAM_TX_COUNT, STREAM_RX_COUNT = 7351, 7129
 RETRY_BYTES = bytes.fromhex("45 00 35 61 ff 0d 00 80 42")
+PERSIST_BYTES = bytes.fromhex("78 00 c3 42 80 35")
 RECOVERY_MSS = 128
 RECOVERY_WINDOW = 5 * RECOVERY_MSS
 RECOVERY_TX_COUNT = 16 * RECOVERY_MSS
@@ -93,7 +96,7 @@ def stream_bytes(offset: int, length: int, salt: int) -> bytes:
                  for index in range(offset, offset + length))
 
 
-def exchange_stream(peer: socket.socket, local_port: int, first_sequence: int) -> None:
+def exchange_stream(peer: socket.socket, local_port: int, first_sequence: int) -> int:
     received = supplied = acknowledged = last_ack = 0
     right = QUEUE_CAPACITY
 
@@ -106,9 +109,8 @@ def exchange_stream(peer: socket.socket, local_port: int, first_sequence: int) -
             ))
             supplied += size
             last_ack = received
-        if (received == STREAM_TX_COUNT and acknowledged == STREAM_RX_COUNT and
-                right == STREAM_RX_COUNT + QUEUE_CAPACITY):
-            return
+        if received == STREAM_TX_COUNT and acknowledged == STREAM_RX_COUNT:
+            return right
 
         actual = recv_frame(peer)
         length = struct.unpack_from("!H", actual, 16)[0] - 40
@@ -116,6 +118,8 @@ def exchange_stream(peer: socket.socket, local_port: int, first_sequence: int) -
         require(acknowledged <= next_ack <= supplied, "guest ACK is outside the peer's stream")
         require(right <= next_ack + window <= next_ack + QUEUE_CAPACITY,
                 "guest withdrew receive credit or exceeded its queue")
+        require(next_ack + window == right or next_ack + window - right >= GUEST_RMSS,
+                "guest split receive credit into sub-threshold updates")
         require(0 <= length <= 311 and length + received <= STREAM_TX_COUNT,
                 "guest exceeded its effective MSS or the stream length")
         require(offset == 0x50 and
@@ -131,6 +135,25 @@ def exchange_stream(peer: socket.socket, local_port: int, first_sequence: int) -
         acknowledged = next_ack
         right = next_ack + window
     raise RuntimeError("E4 streams did not complete within the peer frame bound")
+
+
+def check_final_credit(peer: socket.socket, local_port: int, first_sequence: int,
+                       right: int) -> None:
+    # The guest has drained its read queue. There can be earlier window updates
+    # in the socket, but the final sub-MSS remainder need not be advertised.
+    for _ in range(QUEUE_CAPACITY // GUEST_RMSS + 1):
+        if not select([peer], [], [], 0.2)[0]:
+            break
+        frame = recv_frame(peer)
+        window = struct.unpack_from("!H", frame, 48)[0]
+        expected = tcp_frame(local_port, PEER_PORT, (first_sequence + STREAM_TX_COUNT) & 0xFFFFFFFF,
+                             STREAM_RX_COUNT, ACK, window, routed=True, from_guest=True)
+        require(frame == expected, "unexpected trailing frame after the bidirectional stream")
+        require(right + GUEST_RMSS <= STREAM_RX_COUNT + window <= STREAM_RX_COUNT + QUEUE_CAPACITY,
+                "invalid trailing receive-window update")
+        right = STREAM_RX_COUNT + window
+    require(0 <= STREAM_RX_COUNT + QUEUE_CAPACITY - right < GUEST_RMSS,
+            "guest did not advertise the final threshold-sized credit")
 
 
 def recover_dropped_data(peer: socket.socket, local_port: int, first_sequence: int) -> None:
@@ -183,11 +206,29 @@ def recover_two_losses(peer: socket.socket, local_port: int, first_sequence: int
     acknowledge(offset + RECOVERY_MSS)
 
 
+def recover_closed_window(peer: socket.socket, local_port: int, first_sequence: int) -> None:
+    probe = tcp_frame(local_port, PEER_PORT, first_sequence, 0, ACK, QUEUE_CAPACITY,
+                      payload=PERSIST_BYTES[:1], routed=True, from_guest=True)
+    expect_frame(peer, probe, "first byte probe into a zero window")
+    send_frame(peer, tcp_frame(PEER_PORT, local_port, 0, first_sequence, ACK, 0, routed=True))
+    # The receiver now has space, but its unsolicited reopening ACK is lost.
+    expect_frame(peer, probe, "same probe byte after losing the reopening update")
+    next_sequence = (first_sequence + 1) & 0xFFFFFFFF
+    send_frame(peer, tcp_frame(PEER_PORT, local_port, 0, next_sequence, ACK, 64, routed=True))
+    expect_frame(peer, tcp_frame(local_port, PEER_PORT, next_sequence, 0, ACK | PSH,
+                                 QUEUE_CAPACITY, payload=PERSIST_BYTES[1:],
+                                 routed=True, from_guest=True), "stream resumed after the probe ACK")
+    send_frame(peer, tcp_frame(PEER_PORT, local_port, 0,
+                               (first_sequence + len(PERSIST_BYTES)) & 0xFFFFFFFF,
+                               ACK, 64, routed=True))
+
+
 def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
               *, retry_syn: bool = False) -> None:
     start = vm.send_command(f"{APP} {mode}")
+    stream_right = None
     if mode != "entropy":
-        routed = mode in ("routed", "stream", "retransmit", "recovery")
+        routed = mode in ("routed", "stream", "retransmit", "recovery", "persist")
         expect_frame(peer, arp_frame(1, b"\xff" * 6, GUEST_MAC, GUEST_IP,
                                      b"\x00" * 6, PEER_IP), "guest ARP request")
         send_frame(peer, arp_frame(2, GUEST_MAC, PEER_MAC, PEER_IP,
@@ -212,6 +253,8 @@ def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
             if mode == "recovery":
                 window = RECOVERY_WINDOW
                 options = struct.pack("!BBH", 2, 4, RECOVERY_MSS)
+            elif mode == "persist":
+                window = 0
             syn_ack = tcp_frame(PEER_PORT, local_port, PEER_SEQUENCE, next_sequence,
                                 SYN | ACK, window, options, routed=routed)
             expected_ack = tcp_frame(local_port, PEER_PORT, next_sequence, 0, ACK,
@@ -219,11 +262,13 @@ def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
             send_frame(peer, syn_ack)
             expect_frame(peer, expected_ack, "final ACK")
             if stream:
-                exchange_stream(peer, local_port, next_sequence)
+                stream_right = exchange_stream(peer, local_port, next_sequence)
             elif mode == "retransmit":
                 recover_dropped_data(peer, local_port, next_sequence)
             elif mode == "recovery":
                 recover_two_losses(peer, local_port, next_sequence)
+            elif mode == "persist":
+                recover_closed_window(peer, local_port, next_sequence)
             else:
                 send_frame(peer, syn_ack)
                 expect_frame(peer, expected_ack, "repeated final ACK")
@@ -232,9 +277,12 @@ def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
         "stream": "E4 TCP stream: PASS",
         "retransmit": "E5a TCP retransmit: PASS",
         "recovery": "E5b TCP fast recovery: PASS",
+        "persist": "E5c TCP persist: PASS",
     }.get(mode, f"E3 TCP {mode}: PASS")
     require(marker in segment,
             f"TCP guest omitted {mode} PASS:\n{segment}")
+    if stream_right is not None:
+        check_final_credit(peer, local_port, next_sequence, stream_right)
     expect_silent(peer, mode)
 
 
@@ -272,6 +320,7 @@ def main() -> int:
                             run_probe(vm, peer, "stream")
                             run_probe(vm, peer, "retransmit")
                             run_probe(vm, peer, "recovery")
+                            run_probe(vm, peer, "persist")
                     vm.command_expect("pwd", PROMPT)
                 finally:
                     vm.stop()
@@ -286,7 +335,7 @@ def main() -> int:
                         shutil.copy2(path, destination / path.name)
                     print(f"TCP failure artifacts retained in {destination}", file=sys.stderr)
                 raise
-    print("TCP QEMU active open, routed streams, loss recovery and guards: PASS")
+    print("TCP QEMU active open, routed streams, recovery, persist and guards: PASS")
     return 0
 
 

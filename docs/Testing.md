@@ -62,7 +62,7 @@ The general host target and the TCP target share the ordinary TCP suite, so requ
 
 It fails when the sanitizer build or runtime is unavailable instead of silently skipping coverage.
 
-`make test-network-tcp-qemu` uses the production driver to test the handshake and compare large byte streams in both directions. It requires a guarded shell return and checks the temporary images.
+`make test-network-tcp-qemu` uses the production driver to test the handshake, large streams in both directions, loss recovery, and recovery after a lost window reopening. It requires a guarded shell return and checks the temporary images.
 
 `make test-network-abi` compiles the strict-C90-compatible raw-frame header and checks the public information structure against every assembly offset and the shared total size.
 
@@ -312,4 +312,16 @@ The host checks both fast repairs before the timer expires, pins the existing RT
 
 The QEMU peer verifies the bytes and original sequence ranges of two repairs after dropping two segments in the same flight. It also requires a new segment before sending the next cumulative ACK. This distinguishes fast recovery from the RTO path, which would reduce the congestion window below the amount still outstanding.
 
-The clean build regression runs the QEMU probes against images produced with both `ld.lld` and `elf2bin`. This covers the current loss recovery paths, not sender zero-window probing or wire-level shutdown.
+## TCP Short Sends and Window Validation
+
+The host verifies an immediate one-byte request, an ACK independent of the receive-credit threshold, and a short tail held until the exact 200 ms override across clock wrap. Further writes and non-advancing ACKs do not restart it. A small valid window still caps the forced send.
+
+Reads below the receive threshold grant no new credit in standalone or piggybacked ACKs. At the threshold the tests verify both forms of advertisement, including a deferred zero-window reopening that accepts no bytes until the update reaches the wire. A credit update due at the same time as a persist probe is sent as a separate pure ACK.
+
+Persist cases check the one-byte sequence and content, the first and repeat deadlines, clock and sequence wrap, and reopening with and without a cumulative probe ACK. They verify that ARP and caller deferral do not commit a probe, and that a held or reopened window does not spend a timeout retry. A zero-window ACK cannot defer the hard transmit deadline.
+
+Continuous zero-wait reads check that ordinary ACKs and due probes both reach the wire without an extra poll. A separate trace gives each read time for only one send, defers a due probe at the raw transmit gate, and verifies that the probe retains its turn without advertising newly freed receive credit.
+
+The QEMU peer leaves the window closed until it receives a one-byte probe, then intentionally omits the reopening update. It requires another probe with the exact same sequence and payload, acknowledges that byte, and compares the complete resumed stream. The duplex test also checks that receive-credit updates meet the threshold without requiring the final sub-threshold space to be advertised.
+
+The clean build regression runs these probes against images produced with both `ld.lld` and `elf2bin`. It does not cover wire-level shutdown.

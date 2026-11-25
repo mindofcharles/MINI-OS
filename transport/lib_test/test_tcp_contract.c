@@ -244,6 +244,16 @@ static int check_fast_recovery(const struct tcp_config *config)
            finish_transmit_probe(handle);
 }
 
+static int check_persist(const struct tcp_config *config)
+{
+    static const unsigned char data[] = {0x78U, 0U, 0xc3U, 0x42U, 0x80U, 0x35U};
+    tcp_handle handle = TCP_INVALID_HANDLE;
+
+    return tcp_connect(&handle, &routed_endpoint, config, 10000U) == 0 &&
+           tcp_send(handle, data, sizeof(data), 0U) == (int)sizeof(data) &&
+           finish_transmit_probe(handle);
+}
+
 int main(int argc, char **argv)
 {
     struct tcp_config config;
@@ -268,6 +278,10 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "recovery") == 0) {
         success = check_fast_recovery(&config);
         printf("E5b TCP fast recovery: %s\n", success ? "PASS" : "FAIL");
+        return success ? 0 : 1;
+    } else if (strcmp(argv[1], "persist") == 0) {
+        success = check_persist(&config);
+        printf("E5c TCP persist: %s\n", success ? "PASS" : "FAIL");
         return success ? 0 : 1;
     } else if (strcmp(argv[1], "open") == 0 || strcmp(argv[1], "routed") == 0 ||
                strcmp(argv[1], "refuse") == 0) {

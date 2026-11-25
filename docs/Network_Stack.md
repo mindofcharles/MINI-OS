@@ -8,7 +8,7 @@ Protocol parsing, packet construction, timers, and bounded state are modern C un
 
 The supported protocol subset is Ethernet II, Ethernet/IPv4 ARP, static-address unfragmented IPv4, ICMP Echo, and one actively opened IPv4 TCP connection with bounded bidirectional byte streams.
 
-TCP uses congestion control and can recover from dropped data or acknowledgments within a bounded retry and transmit budget. Sender zero-window probing and recovery from a lost window-reopening update, passive open, and wire-level shutdown are not implemented.
+TCP uses congestion control and can recover from dropped data, acknowledgments, or zero-window reopening updates within its transmit budget. Passive open and wire-level shutdown are not implemented.
 
 UDP, DHCP, DNS, SSH, IPv4 options, fragment reassembly, and ICMP error processing are not implemented.
 
@@ -92,7 +92,7 @@ A data segment carries at most the smaller of the peer's usable MSS and 536 byte
 
 An otherwise valid window update may reuse both sequence and acknowledgment values from the last report because the peer can free buffer space without advancing either value. Those two fields alone cannot order such reports. See [RFC 9293 section 3.8.6](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6).
 
-The receiver drops out-of-order data and acknowledges the next byte it needs. It trims already received prefixes and data beyond its advertised right edge. A full queue advertises zero and answers a peer probe without consuming a byte. Reading data schedules a window update, which can be sent on its own or carried by outgoing data. Space is not granted to the peer until the corresponding window is transmitted.
+The receiver drops out-of-order data, trims already received prefixes and data beyond its advertised right edge, and promptly acknowledges the next byte it needs. A zero-window receiver answers a peer probe without consuming its byte. New receive credit can be sent on its own or carried by eligible outgoing data, but only after a successful window advertisement does it become valid for inbound payload.
 
 An established connection accepts a reset at its next expected receive sequence. A reset elsewhere in the advertised window requests an empty challenge ACK, at most once per 500 ms per connection. Other resets are ignored, including non-exact resets when the window is zero. A challenge does not carry queued application data. See [RFC 9293 section 3.10.7.4](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.10.7.4) for the reset checks.
 
@@ -114,7 +114,7 @@ The independent `transmit_timeout_ms` limit defaults to 300,000 ms. It runs whil
 
 Before starting a raw TCP transmit, the Ethernet layer checks both the no-progress deadline and any positive caller wait against the same clock reading. The no-progress deadline also applies to zero-wait calls, and an ACK processed at or after that deadline cannot revive the connection.
 
-No ordinary retries run against a closed peer receive window. Until sender probing is implemented, the connection needs a valid reopening update to resume in that case, and the independent no-progress limit still applies.
+Ordinary retransmission does not run against a closed peer receive window. The separate persist timer can request an update without spending a retry. The independent no-progress limit still applies.
 
 ## TCP sender congestion control
 
@@ -131,6 +131,18 @@ With bytes outstanding and a nonzero peer window, three pure ACKs at the next ex
 The recovery boundary is the exclusive end of the flight when the first fast retry is sent. A partial ACK schedules a retry of the new oldest eligible bytes without leaving recovery. An ACK covering the boundary ends recovery even if newer bytes remain outstanding. A timeout ends fast recovery and prevents a second entry based on duplicate reports for the same flight. See [RFC 6582](https://www.rfc-editor.org/rfc/rfc6582.html#section-3.2).
 
 A successful fast retry marks RTT samples ambiguous and restarts the fallback timer at its existing RTO, without backing off or spending one of the five timeout retries. A due timeout has priority over a queued fast retry. While ARP or the caller's deadline prevents output, no transmission is committed and the pending range is rechecked before sending. A fast retry does not reset the connection's independent transmit no-progress deadline.
+
+## Short sends, receive credit, and persist
+
+Full-sized segments are eligible immediately within the available peer and congestion windows. With no outstanding bytes, the sender also sends a short queue in full or uses a grant of at least half the largest valid window seen from this peer. Otherwise the sender briefly holds an eligible short segment to combine short writes or avoid sending a tiny slice of a larger queue. The 200 ms override is measured from the first deferral of the same unsent prefix. Further writes, polls, or duplicate ACKs do not restart it. It relaxes only the short-segment policy, never either window limit. See [RFC 9293 section 3.8.6.2.1](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6.2.1).
+
+Reading frees local storage immediately. The receiver keeps its last on-wire window right edge until newly available, unadvertised credit reaches 536 bytes, the MSS it advertises at open. The cumulative ACK still advances promptly on incoming data. A pure ACK and an ACK on ordinary outgoing data use the same right-edge rule, and a failed or deferred transmit does not grant credit. See [RFC 9293 section 3.8.6.2.2](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6.2.2).
+
+If queued data needs to be sent and the peer advertises zero, the persist timer waits for the current RTO before probing. Each successfully sent probe doubles the wait, up to 60 seconds. It retransmits the first outstanding byte when possible, or sends the first queued unsent byte. A new probe byte is ACKable only after successful raw transmission. Until acknowledged or sent as ordinary data, it remains separate from ordinary flight and does not move the sequence number on ACK-only traffic.
+
+Needed ACKs and window updates are sent separately from probes because the peer may reject the probe payload. If a due probe yields to a pure ACK, the probe gets the next available send opportunity even if another ordinary ACK or window update is pending. It leaves that pending ACK and the previously advertised receive right edge intact.
+
+A valid window reopening stops persist. A cumulative ACK of the probe frees it once. If the window reopens without acknowledging a new probe byte, the next ordinary send includes that same byte, instead of skipping it. Remaining ordinary flight gets a fresh RTO interval with its retry count preserved unless cumulative progress resets the count. Time spent probing does not produce RTT samples or consume the ordinary retry budget. Zero-window replies without cumulative progress do not extend either the caller's wait or the transmit no-progress deadline. See [RFC 9293 section 3.8.6.1](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6.1).
 
 ## Internal ownership and resource bounds
 
@@ -168,9 +180,9 @@ This is not an implemented target idle/wakeup path, and the deterministic backen
 
 It checks the TCP lifecycle foundation and uses independent wire vectors for the codec, including the IPv4 receive and transmit-buffer paths.
 
-`make test-network-tcp` runs the TCP host suite normally and with AddressSanitizer and UndefinedBehaviorSanitizer, compiles the target TCP objects, and builds the strict-C90 guest probe. It covers the handshake, ring and sequence wrap, partial ACKs, large binary streams, closure and reopening of the receive window, retransmission timing, congestion growth and recovery, neighbor refresh, and terminal causes.
+`make test-network-tcp` runs the TCP host suite normally and with AddressSanitizer and UndefinedBehaviorSanitizer, compiles the target TCP objects, and builds the strict-C90 guest probe. It covers the handshake, ring and sequence wrap, partial ACKs, large binary streams, timed short sends, receive credit, persist, retransmission, congestion recovery, neighbor refresh, and terminal causes.
 
-`make test-network-tcp-qemu` verifies handshake retransmission, lost final ACK recovery, refusal, and the no-entropy path through QEMU's NE2000 device. A controlled Ethernet peer and the guest also check exact streams of 7,351 and 7,129 bytes in opposite directions. Loss cases verify a timed retry and repair of two missing segments in a five-segment flight, including new data sent before recovery completes. The test also checks gateway routing, an i386 HMAC known-answer vector, repeated application runs, guarded shell return, and image integrity.
+`make test-network-tcp-qemu` verifies handshake retransmission, lost final ACK recovery, refusal, and the no-entropy path through QEMU's NE2000 device. A controlled Ethernet peer and the guest also check exact streams of 7,351 and 7,129 bytes in opposite directions and measure receive-credit updates on the wire. Loss cases verify a timed retry, repair of two missing segments in a five-segment flight, and exact stream resumption after the peer's zero-window reopening update is lost. The test also checks gateway routing, an i386 HMAC known-answer vector, repeated application runs, guarded shell return, and image integrity.
 
 `make test-network-d6` boots temporary debug images and tests exact ARP and ICMP wire packets through QEMU's NE2000 model against a controlled Ethernet peer, including cache reuse and expiry, malformed-packet rejection, inbound replies, bounded timeout, and keyboard cancellation.
 

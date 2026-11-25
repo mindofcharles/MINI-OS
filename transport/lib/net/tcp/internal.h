@@ -4,6 +4,7 @@
 #include "../tcp.h"
 #include "../service.h"
 #include "congestion.h"
+#include "flow.h"
 #include "rto.h"
 
 enum {
@@ -28,6 +29,7 @@ struct tcp_active_open {
 struct tcp_stream {
     struct tcp_rto rto;
     struct tcp_congestion congestion;
+    struct tcp_flow flow;
     net_u32 snd_una;
     net_u32 rcv_nxt;
     net_u32 rcv_right; /* Exclusive right edge last sent on the wire. */
@@ -40,6 +42,7 @@ struct tcp_stream {
     net_u8 neighbor_pending;
     net_u8 challenge_pending;
     net_u8 challenge_limited;
+    net_u8 probe_preferred; /* A due probe already yielded to a pure ACK. */
 };
 
 struct tcp_connection {

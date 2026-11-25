@@ -29,6 +29,9 @@ void tcp_rto_new_data(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms,
                       int start_timer);
 void tcp_rto_retransmitted(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms);
 void tcp_rto_fast_retransmitted(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms);
+/* Flow-control pauses and probe replays are not losses or RTT measurements. */
+void tcp_rto_mark_ambiguous(struct tcp_rto *rto, net_u32 right);
+void tcp_rto_rearm(struct tcp_rto *rto, net_u32 right, net_u32 now_ms);
 
 /* Called only for cumulative ACK progress, with the remaining flight size. */
 void tcp_rto_acknowledged(struct tcp_rto *rto, net_u32 ack, unsigned int flight,

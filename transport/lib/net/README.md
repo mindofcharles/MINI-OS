@@ -37,7 +37,7 @@ ARP learning remains unauthenticated, and options, fragment reassembly, ICMP err
 
 One attempt keeps its original connection deadline and SYN retry history across caller waits. Successful transmission of the final ACK commits the handshake. A matching refusal or exhausted protocol budget becomes a retained terminal result and counts as polling work without interrupting other protocols.
 
-The SYN advertises a zero receive window, and the successful final ACK advertises 4 KiB. `tcp_send` copies a partial prefix into a fixed ring, separating unsent and outstanding bytes. `tcp_recv` copies contiguous bytes from another ring and schedules a window update. A full receive queue answers probes without accepting data. Positive wait expiry does not terminate an otherwise live connection.
+The SYN advertises a zero receive window, and the successful final ACK advertises 4 KiB. `tcp_send` copies a partial prefix into a fixed ring, separating unsent and outstanding bytes. `tcp_recv` copies contiguous bytes from another ring, and a window update becomes eligible after at least 536 unadvertised bytes have accumulated. A closed receive window answers probes without accepting data. Positive wait expiry does not terminate an otherwise live connection.
 
 The shared service applies a positive stream wait deadline before each new raw receive or transmit. Data received by an already started poll remains queued, and pending output can continue in a later service call.
 
@@ -47,7 +47,9 @@ The shared service applies a positive stream wait deadline before each new raw r
 
 `tcp/congestion.c` limits new data using a byte-counted congestion window, with slow start, congestion avoidance, timeout loss reduction, and idle restart. The sender can have multiple segments outstanding within the peer window and the two existing queue bounds.
 
-Three qualified duplicate ACKs can schedule a fast retransmission, and partial ACKs keep recovery active until the original flight is acknowledged. A fast retransmission does not spend the timeout retry budget. The current stream path does not probe a closed peer receive window or process wire-level FIN and EOF.
+Three qualified duplicate ACKs can schedule a fast retransmission, and partial ACKs keep recovery active until the original flight is acknowledged. A fast retransmission does not spend the timeout retry budget.
+
+`tcp/flow.c` keeps a 200 ms ceiling on deferring otherwise eligible short sends and computes receive-credit advertisements separately from prompt cumulative ACKs. It also schedules one-byte persist probes from the existing transmit ring when the peer window is zero. Probes do not consume ordinary retries or reset caller and no-progress deadlines. The stream still does not process wire-level FIN and EOF.
 
 Private lifecycle helpers retain terminal errors after partial-progress reporting, separate call waits from a once-captured close-grace deadline, reject unread-data loss, and prevent old handles from reaching a new generation.
 

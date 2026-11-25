@@ -10,7 +10,7 @@ enum {
     TCP_CHALLENGE_ACK_INTERVAL_MS = 500
 };
 
-enum tcp_data_send { TCP_DATA_NEW, TCP_DATA_FAST, TCP_DATA_TIMEOUT };
+enum tcp_data_send { TCP_DATA_NEW, TCP_DATA_FAST, TCP_DATA_TIMEOUT, TCP_DATA_PROBE };
 
 _Static_assert(TCP_QUEUE_CAPACITY <= USHRT_MAX, "receive window fits without scaling");
 _Static_assert((int)TCP_IPV4_DEFAULT_MSS <= (int)TCP_IPV4_DATA_MAX,
@@ -36,6 +36,7 @@ void tcp_stream_start(struct tcp_connection *connection)
     stream->window_seq = connection->open.irs;
     stream->window_ack = stream->snd_una;
     stream->peer_window = connection->open.peer_window;
+    stream->flow.max_peer_window = stream->peer_window;
     tcp_rto_init(&stream->rto, connection->open.short_syn_timeout);
     tcp_congestion_init(&stream->congestion, effective_mss(connection));
 }
@@ -52,6 +53,9 @@ unsigned int tcp_stream_write(struct tcp_connection *connection,
                     tcp_ring_offset(connection->tx_head, connection->tx_length),
                     data, copied);
     connection->tx_length += copied;
+    if (copied != 0U && connection->stream.peer_window == 0U) {
+        tcp_flow_persist_start(&connection->stream.flow, now_ms, connection->stream.rto.wait_ms);
+    }
     return copied;
 }
 
@@ -70,10 +74,6 @@ unsigned int tcp_stream_read(struct tcp_connection *connection,
     tcp_ring_read(connection->rx_queue, connection->rx_head, data, copied);
     connection->rx_head = tcp_ring_offset(connection->rx_head, copied);
     connection->rx_length -= copied;
-    if (copied != 0U) {
-        /* Free space is not receive credit until the update has been sent. */
-        connection->stream.ack_pending = 1U;
-    }
     return copied;
 }
 
@@ -81,7 +81,7 @@ static unsigned int sendable_bytes(struct tcp_connection *connection, net_u32 no
 {
     struct tcp_stream *stream = &connection->stream;
     unsigned int unsent = connection->tx_length - connection->tx_outstanding;
-    unsigned int smss, limit;
+    unsigned int smss, limit, eligible;
 
     if (unsent == 0U) {
         return 0U;
@@ -92,7 +92,30 @@ static unsigned int sendable_bytes(struct tcp_connection *connection, net_u32 no
     if (connection->tx_outstanding >= limit) {
         return 0U;
     }
-    return smaller(smss, smaller(limit - connection->tx_outstanding, unsent));
+    eligible = smaller(smss, smaller(limit - connection->tx_outstanding, unsent));
+    return tcp_flow_send_length(&stream->flow, smss, connection->tx_outstanding,
+                                 unsent, eligible, now_ms);
+}
+
+static unsigned int stream_receive_window(const struct tcp_connection *connection)
+{
+    const struct tcp_stream *stream = &connection->stream;
+
+    return tcp_flow_receive_window(TCP_QUEUE_CAPACITY - connection->rx_length,
+                                   stream->rcv_right - stream->rcv_nxt, TCP_IPV4_DEFAULT_MSS);
+}
+
+static int stream_ack_needed(const struct tcp_stream *stream, unsigned int window)
+{
+    return stream->ack_pending || window > stream->rcv_right - stream->rcv_nxt;
+}
+
+static int stream_probe_due(const struct tcp_connection *connection, net_u32 now_ms)
+{
+    const struct tcp_stream *stream = &connection->stream;
+
+    return stream->peer_window == 0U && connection->tx_length != 0U &&
+           tcp_flow_persist_due(&stream->flow, now_ms);
 }
 
 static int retry_bytes(const struct tcp_connection *connection, net_u32 now_ms)
@@ -117,20 +140,27 @@ static int stream_data_bytes(struct tcp_connection *connection, net_u32 now_ms,
                              enum tcp_data_send *kind)
 {
     const struct tcp_stream *stream = &connection->stream;
-    int retry = retry_bytes(connection, now_ms);
+    unsigned int fast;
+    int retry;
 
+    if (stream->peer_window == 0U) {
+        *kind = TCP_DATA_PROBE;
+        /* A standalone ACK can go first, but not on every output opportunity. */
+        return stream_probe_due(connection, now_ms) && !stream->challenge_pending &&
+               (stream->probe_preferred ||
+                !stream_ack_needed(stream, stream_receive_window(connection)));
+    }
+
+    retry = retry_bytes(connection, now_ms);
     if (retry != 0) {
         *kind = TCP_DATA_TIMEOUT;
         return retry;
     }
-    if (stream->peer_window != 0U) {
-        unsigned int fast = tcp_congestion_fast_bytes(&stream->congestion, stream->snd_una,
-                                                      connection->tx_outstanding);
-
-        if (fast != 0U) {
-            *kind = TCP_DATA_FAST;
-            return (int)smaller(fast, smaller(stream->peer_window, effective_mss(connection)));
-        }
+    fast = tcp_congestion_fast_bytes(&stream->congestion, stream->snd_una,
+                                     connection->tx_outstanding);
+    if (fast != 0U) {
+        *kind = TCP_DATA_FAST;
+        return (int)smaller(fast, smaller(stream->peer_window, effective_mss(connection)));
     }
     *kind = TCP_DATA_NEW;
     return (int)sendable_bytes(connection, now_ms);
@@ -170,7 +200,7 @@ int tcp_stream_output(struct tcp_connection *connection, net_u32 now_ms)
     struct tcp_stream *stream = &connection->stream;
     struct net_mac_addr mac;
     enum tcp_data_send kind;
-    unsigned int length, offset;
+    unsigned int length, offset, window;
     int result, data_bytes, ordinary_output;
 
     if (tcp_stream_transmit_expired(connection, now_ms)) {
@@ -181,7 +211,8 @@ int tcp_stream_output(struct tcp_connection *connection, net_u32 now_ms)
         /* A queued ACK may make the final expiry obsolete. Recheck after input. */
         return 0;
     }
-    ordinary_output = data_bytes != 0 || stream->ack_pending;
+    window = stream_receive_window(connection);
+    ordinary_output = data_bytes != 0 || stream_ack_needed(stream, window);
 
     if (!ordinary_output && !stream->challenge_pending) {
         if (stream->neighbor_pending) {
@@ -226,7 +257,8 @@ int tcp_stream_output(struct tcp_connection *connection, net_u32 now_ms)
     /* Resolution is complete even if the caller's budget defers raw output. */
     stream->neighbor_pending = 0U;
     data_bytes = stream_data_bytes(connection, now_ms, &kind);
-    if (data_bytes < 0 || (data_bytes == 0 && !stream->ack_pending && !stream->challenge_pending)) {
+    if (data_bytes < 0 || (data_bytes == 0 && !stream_ack_needed(stream, window) &&
+                          !stream->challenge_pending)) {
         /* Idle restart can remove the new-data credit while resolving ARP. */
         return 0;
     }
@@ -235,18 +267,22 @@ int tcp_stream_output(struct tcp_connection *connection, net_u32 now_ms)
     if (stream->challenge_pending) {
         /* A challenge is an empty ACK, not a reason to send user data. */
         length = 0U;
-    } else if (kind != TCP_DATA_NEW) {
+    } else if (length != 0U && kind != TCP_DATA_NEW) {
         offset = 0U;
+        if (kind == TCP_DATA_PROBE) {
+            /* The peer may reject the probe. Keep new credit for a standalone ACK. */
+            window = stream->rcv_right - stream->rcv_nxt;
+        }
     }
 
     struct tcp_segment_view segment = {
         .sequence = stream->snd_una + offset,
         .acknowledgment = stream->rcv_nxt,
-        .window = (net_u16)(TCP_QUEUE_CAPACITY - connection->rx_length),
+        .window = (net_u16)window,
         .flags = TCP_FLAG_ACK,
         .payload_length = length
     };
-    if (length != 0U && length == connection->tx_length - offset) {
+    if (length != 0U && kind != TCP_DATA_PROBE && length == connection->tx_length - offset) {
         segment.flags |= TCP_FLAG_PSH;
     }
     struct net_tx_deadline deadline = {
@@ -270,6 +306,16 @@ int tcp_stream_output(struct tcp_connection *connection, net_u32 now_ms)
         unsigned int smss = effective_mss(connection);
 
         /* Only a successful raw send changes the flight and timing state. */
+        if (kind == TCP_DATA_PROBE) {
+            /* One new probe byte is ACKable without moving the ordinary
+             * send sequence used by ACK-only traffic in the reverse direction. */
+            if (connection->tx_outstanding == 0U) {
+                stream->flow.probe_sent = 1U;
+            }
+            tcp_flow_persist_sent(&stream->flow, sent_ms);
+            stream->probe_preferred = 0U;
+            return 1; /* Leave any pending ACK and the last granted window intact. */
+        }
         if (kind == TCP_DATA_TIMEOUT) {
             tcp_congestion_timeout_sent(&stream->congestion, smss, flight_end,
                                         connection->tx_outstanding, length, sent_ms);
@@ -279,11 +325,22 @@ int tcp_stream_output(struct tcp_connection *connection, net_u32 now_ms)
                                      connection->tx_outstanding, sent_ms);
             tcp_rto_fast_retransmitted(&stream->rto, flight_end, sent_ms);
         } else {
+            stream->flow.short_pending = 0U;
             tcp_congestion_new_sent(&stream->congestion, sent_ms);
             connection->tx_outstanding += length;
-            tcp_rto_new_data(&stream->rto, flight_end + length,
-                              sent_ms, offset == 0U);
+            if (stream->flow.probe_sent) {
+                /* A window-only reopen did not ACK the probe. This legal
+                 * send starts at the same byte and now owns normal flight. */
+                stream->flow.probe_sent = 0U;
+                tcp_rto_mark_ambiguous(&stream->rto, flight_end + length);
+                tcp_rto_rearm(&stream->rto, flight_end + length, sent_ms);
+            } else {
+                tcp_rto_new_data(&stream->rto, flight_end + length, sent_ms, offset == 0U);
+            }
         }
+    } else if (stream_probe_due(connection, now_ms)) {
+        /* Remember the probe's turn across input and caller wait boundaries. */
+        stream->probe_preferred = 1U;
     }
     stream->rcv_right = segment.acknowledgment + segment.window;
     stream->ack_pending = 0U;
@@ -344,24 +401,60 @@ static int receive_overlap(const struct tcp_stream *stream,
     return 0;
 }
 
+static void update_persist(struct tcp_connection *connection, unsigned int previous_window,
+                            net_u32 now_ms)
+{
+    struct tcp_stream *stream = &connection->stream;
+    net_u32 right = stream->snd_una + connection->tx_outstanding;
+
+    if (stream->peer_window == 0U) {
+        if (previous_window != 0U && connection->tx_outstanding != 0U) {
+            tcp_rto_mark_ambiguous(&stream->rto, right);
+        }
+        if (connection->tx_length != 0U) {
+            tcp_flow_persist_start(&stream->flow, now_ms, stream->rto.wait_ms);
+        } else {
+            stream->flow.persist_wait_ms = 0U;
+        }
+    } else if (previous_window == 0U) {
+        stream->flow.persist_wait_ms = 0U;
+        if (connection->tx_outstanding != 0U) {
+            /* Time spent flow-controlled must not expire an old loss timer. */
+            tcp_rto_rearm(&stream->rto, right, now_ms);
+        }
+    }
+    if (stream->flow.persist_wait_ms == 0U) {
+        stream->probe_preferred = 0U;
+    }
+}
+
 static int apply_ack(struct tcp_connection *connection,
                      const struct tcp_segment_view *segment,
                      enum tcp_seq_order order, unsigned int acknowledged, net_u32 now_ms)
 {
     struct tcp_stream *stream = &connection->stream;
     unsigned int smss = effective_mss(connection);
+    unsigned int previous_window = stream->peer_window;
     int progress = 0;
     int duplicate = 0;
 
     if (order == TCP_SEQ_AFTER) {
+        unsigned int ordinary_acked = acknowledged;
+
+        if (stream->flow.probe_sent) {
+            /* The exceptional byte was accepted, not replayed as normal data. */
+            --ordinary_acked;
+            stream->flow.probe_sent = 0U;
+            stream->flow.short_pending = 0U;
+        }
         connection->tx_head = tcp_ring_offset(connection->tx_head, acknowledged);
         connection->tx_length -= acknowledged;
-        connection->tx_outstanding -= acknowledged;
+        connection->tx_outstanding -= ordinary_acked;
         stream->snd_una = segment->acknowledgment;
         connection->transmit_started_ms = connection->tx_length != 0U ? now_ms : 0U;
         tcp_rto_acknowledged(&stream->rto, stream->snd_una, connection->tx_outstanding, now_ms);
         tcp_congestion_acknowledged(&stream->congestion, smss, stream->snd_una,
-                                    acknowledged, connection->tx_outstanding);
+                                    ordinary_acked, connection->tx_outstanding);
         progress = 1;
     }
     if (order != TCP_SEQ_BEFORE) {
@@ -381,9 +474,15 @@ static int apply_ack(struct tcp_connection *connection,
                         segment->payload_length == 0U && segment->sequence == stream->rcv_nxt;
             progress |= changed;
             stream->peer_window = segment->window;
+            if (segment->window > stream->flow.max_peer_window) {
+                stream->flow.max_peer_window = segment->window;
+            }
             stream->window_seq = segment->sequence;
             stream->window_ack = segment->acknowledgment;
         }
+    }
+    if (previous_window == 0U || stream->peer_window == 0U) {
+        update_persist(connection, previous_window, now_ms);
     }
     if (duplicate) {
         progress |= tcp_congestion_duplicate(&stream->congestion, smss);
@@ -426,14 +525,15 @@ int tcp_stream_input(struct tcp_connection *connection,
     order = tcp_seq_compare(segment->acknowledgment, stream->snd_una);
     acknowledged = segment->acknowledgment - stream->snd_una;
     if (order == TCP_SEQ_UNORDERED ||
-        (order == TCP_SEQ_AFTER && acknowledged > connection->tx_outstanding)) {
+        (order == TCP_SEQ_AFTER &&
+         acknowledged > connection->tx_outstanding + stream->flow.probe_sent)) {
         return request_ack(connection, 0, now_ms);
     }
     progress = apply_ack(connection, segment, order, acknowledged, now_ms);
     if (length == 0U) {
         enum tcp_data_send kind;
 
-        if (stream->neighbor_pending && !stream->ack_pending &&
+        if (stream->neighbor_pending && !stream_ack_needed(stream, stream_receive_window(connection)) &&
             !stream->challenge_pending && stream_data_bytes(connection, now_ms, &kind) <= 0) {
             /* No output still needs the ARP task after this ACK/window update. */
             finish_stream_neighbor(connection);
