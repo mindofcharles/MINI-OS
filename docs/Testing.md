@@ -300,4 +300,16 @@ Zero and positive wait cases permit a raw send one tick before the no-progress d
 
 The QEMU peer drops the first copy of a short routed binary segment and verifies the complete retransmitted frame before it acknowledges the bytes. The strict-C90 guest confirms that a shorter call timeout did not end the connection and that the cumulative ACK drains the transmit queue.
 
-The clean build regression runs the QEMU probe against images produced with both `ld.lld` and `elf2bin`. This covers the current data retry path, not sender zero-window probing or wire-level shutdown.
+## TCP Congestion and Fast Recovery Validation
+
+Host traces withhold each cumulative ACK until a growing flight of up to five segments is seen. They cover byte-counted growth, a shrink below the outstanding flight, clock and sequence wrap, idle restart, isolated duplicate-ACK evidence, and timeout fallback without entry into a second recovery for the same flight.
+
+The host checks that a partial ACK refreshes the retry budget without reducing the slow-start threshold again for bytes already retransmitted by timeout. Once the ACK clears that prefix, a timeout for different bytes recalculates the threshold.
+
+Idle restart traces leave old data outstanding while a late ACK moves the RTO deadline. They check that an old full segment blocks new data, that a smaller flight leaves only the remaining restart credit, and that crossing the idle cutoff during the next-hop lookup does not send an empty frame or consume a retry.
+
+The host checks both fast repairs before the timer expires, pins the existing RTO and retry count, and verifies that an ACK of the old recovery edge exits recovery even while newer data is still in flight. Other traces hold a fast retry behind ARP or the caller's deadline, cancel it with a cumulative ACK, and check that a due RTO takes priority after resolution.
+
+The QEMU peer verifies the bytes and original sequence ranges of two repairs after dropping two segments in the same flight. It also requires a new segment before sending the next cumulative ACK. This distinguishes fast recovery from the RTO path, which would reduce the congestion window below the amount still outstanding.
+
+The clean build regression runs the QEMU probes against images produced with both `ld.lld` and `elf2bin`. This covers the current loss recovery paths, not sender zero-window probing or wire-level shutdown.

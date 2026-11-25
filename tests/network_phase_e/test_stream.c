@@ -1362,6 +1362,311 @@ static int read_progress_then_device_failure(void)
     return dispose(&peer, 1);
 }
 
+enum {
+    CONGESTION_SMSS = 64,
+    CONGESTION_WARMUP = 10 * CONGESTION_SMSS,
+    CONGESTION_FLIGHT = 5 * CONGESTION_SMSS,
+    CONGESTION_END = CONGESTION_WARMUP + CONGESTION_FLIGHT
+};
+
+struct congestion_fixture {
+    struct peer peer;
+    unsigned char data[CONGESTION_END + CONGESTION_SMSS];
+    unsigned int length;
+};
+
+static int take_congestion_frame(const struct congestion_fixture *fixture,
+                                  const struct net_mac_addr *mac,
+                                  unsigned int offset, unsigned int length)
+{
+    return take(&fixture->peer, mac, (struct wire_segment){
+        .seq = fixture->peer.first_send + offset, .ack = fixture->peer.first_receive,
+        .window = TCP_QUEUE_CAPACITY, .data = fixture->data + offset, .length = length,
+        .flags = ACK | (length != 0U && offset + length == fixture->length ? PSH : 0U)
+    });
+}
+
+static int congestion_ack(const struct congestion_fixture *fixture,
+                           unsigned int offset, unsigned int window, int actions)
+{
+    CHECK(receive_later(&fixture->peer, (struct wire_segment){
+        .seq = fixture->peer.first_receive, .ack = fixture->peer.first_send + offset,
+        .window = window, .flags = ACK
+    }, 0U));
+    CHECK(net_poll(0U) == actions);
+    return 1;
+}
+
+static int prepare_congestion_flight(struct congestion_fixture *fixture, net_u32 start,
+                                      unsigned int ttl, int unsent_tail)
+{
+    unsigned int offset = 0U;
+
+    fixture->length = CONGESTION_END + (unsent_tail ? CONGESTION_SMSS : 0U);
+    pattern(fixture->data, 0U, fixture->length, 45U);
+    CHECK(reset(start, ttl));
+    CHECK(establish(&fixture->peer, 31U, CONGESTION_FLIGHT, CONGESTION_SMSS));
+    CHECK(tcp_send(fixture->peer.handle, fixture->data, fixture->length, 0U) ==
+          (int)fixture->length);
+
+    for (unsigned int flight = 1U; flight <= 5U; ++flight) {
+        for (unsigned int segment = 0U; segment < flight; ++segment) {
+            CHECK(offset == 0U || net_poll(0U) == 1);
+            CHECK(take_congestion_frame(fixture, &gateway, offset, CONGESTION_SMSS));
+            offset += CONGESTION_SMSS;
+        }
+        /* The next cumulative ACK is withheld until the entire flight is sent. */
+        CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+        if (flight < 5U) {
+            CHECK(congestion_ack(fixture, offset, CONGESTION_FLIGHT, 1));
+        }
+    }
+    CHECK(offset == CONGESTION_END);
+    return 1;
+}
+
+static int queue_fast_retry(const struct congestion_fixture *fixture)
+{
+    CHECK(congestion_ack(fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 0));
+    CHECK(congestion_ack(fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 0));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    CHECK(congestion_ack(fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 1));
+    CHECK(network_test_backend_transmit_count() == 0U);
+    return 1;
+}
+
+static int fast_recovery_on_wire(void)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    const struct tcp_congestion *cc = &connection->stream.congestion;
+    const net_u32 start = 1605633777U; /* The first data sequence is just before wrap. */
+    const unsigned int partial = CONGESTION_WARMUP + 2U * CONGESTION_SMSS;
+    struct congestion_fixture fixture;
+    unsigned long long srtt, variance;
+
+    CHECK(prepare_congestion_flight(&fixture, start, network.arp_cache_ttl_ms, 1));
+    CHECK(fixture.peer.first_send == 0xffffffd1U && cc->cwnd == CONGESTION_FLIGHT);
+    srtt = rto->srtt_q3;
+    variance = rto->variance_q3;
+    network_test_backend_clock_advance(200U);
+    CHECK(queue_fast_retry(&fixture));
+    CHECK(cc->cwnd == CONGESTION_FLIGHT && rto->timer_started_ms == start);
+    CHECK(net_poll(0U) == 1);
+    CHECK(take_congestion_frame(&fixture, &gateway, CONGESTION_WARMUP, CONGESTION_SMSS));
+    CHECK(connection->tx_outstanding == CONGESTION_FLIGHT &&
+          connection->transmit_started_ms == start);
+    CHECK(rto->retries == 0U && rto->wait_ms == 1000U && rto->timer_started_ms == start + 200U);
+    CHECK(cc->recovery_end == fixture.peer.first_send + CONGESTION_END);
+
+    /* A and C were lost. Repairing A acknowledges A+B but still leaves C missing. */
+    network_test_backend_clock_advance(50U);
+    CHECK(congestion_ack(&fixture, partial, CONGESTION_FLIGHT, 1));
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway, partial, CONGESTION_SMSS));
+    CHECK(rto->retries == 0U && rto->wait_ms == 1000U && rto->timer_started_ms == start + 250U);
+    CHECK(net_poll(0U) == 1);
+    CHECK(take_congestion_frame(&fixture, &gateway, CONGESTION_END, CONGESTION_SMSS));
+    CHECK(connection->tx_outstanding == 4U * CONGESTION_SMSS);
+
+    network_test_backend_clock_advance(50U);
+    CHECK(congestion_ack(&fixture, CONGESTION_END, CONGESTION_FLIGHT, 1));
+    CHECK(cc->cwnd == 2U * CONGESTION_SMSS && connection->tx_outstanding == CONGESTION_SMSS);
+    CHECK(rto->srtt_q3 == srtt && rto->variance_q3 == variance); /* Karn applies to both repairs. */
+    for (unsigned int index = 0U; index < 3U; ++index) {
+        CHECK(congestion_ack(&fixture, CONGESTION_END, CONGESTION_FLIGHT, 0));
+    }
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(congestion_ack(&fixture, fixture.length, CONGESTION_FLIGHT, 1));
+    CHECK(state(&fixture.peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    return dispose(&fixture.peer, 1);
+}
+
+static int idle_restart_on_wire(void)
+{
+    const struct tcp_congestion *cc = &tcp_global_context.connection.stream.congestion;
+    const unsigned int reopened_window = CONGESTION_FLIGHT + CONGESTION_SMSS;
+    struct congestion_fixture fixture;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, network.arp_cache_ttl_ms, 0));
+    CHECK(congestion_ack(&fixture, CONGESTION_END, CONGESTION_FLIGHT, 1));
+    CHECK(cc->cwnd == reopened_window);
+    network_test_backend_clock_advance(1000U);
+    /* An incoming window report does not make the outgoing path non-idle. */
+    CHECK(congestion_ack(&fixture, CONGESTION_END, reopened_window, 1));
+    fixture.peer.first_send += CONGESTION_END;
+    fixture.length = 2U * CONGESTION_SMSS;
+    CHECK(tcp_send(fixture.peer.handle, fixture.data, fixture.length, 0U) == (int)fixture.length);
+    CHECK(take_congestion_frame(&fixture, &gateway, 0U, CONGESTION_SMSS));
+    CHECK(cc->cwnd == CONGESTION_SMSS);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(congestion_ack(&fixture, CONGESTION_SMSS, reopened_window, 1));
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_SMSS, CONGESTION_SMSS));
+    CHECK(congestion_ack(&fixture, fixture.length, reopened_window, 1));
+    CHECK(state(&fixture.peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    return dispose(&fixture.peer, 1);
+}
+
+static int idle_restart_with_outstanding(unsigned int flight, int expiry_during_lookup)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_congestion *cc = &connection->stream.congestion;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    const unsigned int credit = CONGESTION_SMSS - flight;
+    struct congestion_fixture fixture;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, network.arp_cache_ttl_ms, 0));
+    network_test_backend_clock_set(800U);
+    CHECK(congestion_ack(&fixture, CONGESTION_END - flight, CONGESTION_FLIGHT, 1));
+    CHECK(connection->tx_outstanding == flight && cc->cwnd > CONGESTION_SMSS);
+    CHECK(rto->timer_started_ms == 800U && rto->wait_ms == 1000U && cc->last_data_sent_ms == 0U);
+
+    fixture.length += CONGESTION_SMSS;
+    pattern(fixture.data + CONGESTION_END, CONGESTION_END, CONGESTION_SMSS, 45U);
+    network_test_backend_clock_set(expiry_during_lookup ? 996U : 1100U);
+    if (expiry_during_lookup) {
+        /* Initial data selection is at 998 ms; the MAC lookup crosses 1000. */
+        network_test_backend_set_clock_read_step(1U);
+    }
+    CHECK(tcp_send(fixture.peer.handle, fixture.data + CONGESTION_END,
+                   CONGESTION_SMSS, 0U) == CONGESTION_SMSS);
+    network_test_backend_set_clock_read_step(0U);
+    CHECK(cc->cwnd == CONGESTION_SMSS && rto->timer_started_ms == 800U && rto->retries == 0U);
+    if (expiry_during_lookup) {
+        CHECK(connection->stream.neighbor_started_ms == 999U && net_clock_now_ms() >= 1000U);
+        CHECK(!net_global_context.pending_arp.active && !connection->stream.neighbor_pending);
+    }
+    if (credit != 0U) {
+        CHECK(take_congestion_frame(&fixture, &gateway, CONGESTION_END, credit));
+    }
+    CHECK(cc->last_data_sent_ms == (credit != 0U ? 1100U : 0U));
+    CHECK(connection->tx_outstanding == CONGESTION_SMSS);
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+
+    CHECK(congestion_ack(&fixture, CONGESTION_END + credit, CONGESTION_FLIGHT, 1));
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_END + credit, flight));
+    CHECK(congestion_ack(&fixture, fixture.length, CONGESTION_FLIGHT, 1));
+    CHECK(state(&fixture.peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+    return dispose(&fixture.peer, 1);
+}
+
+static int timeout_loss_threshold_after_partial_ack(void)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_congestion *cc = &connection->stream.congestion;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    const unsigned int half = CONGESTION_SMSS / 2U;
+    struct congestion_fixture fixture;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, network.arp_cache_ttl_ms, 0));
+    network_test_backend_clock_set(1000U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_WARMUP, CONGESTION_SMSS));
+    CHECK(cc->ssthresh == CONGESTION_FLIGHT / 2U && rto->retries == 1U);
+
+    network_test_backend_clock_set(1010U);
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP + half, half, 1));
+    CHECK(rto->retries == 0U && rto->wait_ms == 2000U);
+    network_test_backend_clock_set(3010U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_WARMUP + half, half));
+    CHECK(cc->ssthresh == CONGESTION_FLIGHT / 2U && rto->retries == 1U);
+
+    /* This ACK clears the previously retransmitted prefix, but not the flight. */
+    network_test_backend_clock_set(3020U);
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP + CONGESTION_SMSS, half, 1));
+    CHECK(rto->retries == 0U && rto->wait_ms == 4000U);
+    network_test_backend_clock_set(7020U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway,
+                                                     CONGESTION_WARMUP + CONGESTION_SMSS, half));
+    CHECK(cc->ssthresh == 2U * CONGESTION_SMSS && rto->retries == 1U);
+    return dispose(&fixture.peer, 1);
+}
+
+static int window_reports_and_rto(void)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_congestion *cc = &connection->stream.congestion;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    const unsigned int window = 34U;
+    struct congestion_fixture fixture;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, network.arp_cache_ttl_ms, 1));
+    network_test_backend_clock_advance(200U);
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 0));
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, CONGESTION_FLIGHT, 0));
+    for (unsigned int next = 32U; next <= window; ++next) {
+        CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, next, 1));
+    }
+    for (unsigned int index = 0U; index < 3U; ++index) {
+        CHECK(congestion_ack(&fixture, CONGESTION_WARMUP - 1U, window, 0));
+        CHECK(receive_later(&fixture.peer, (struct wire_segment){
+            .seq = fixture.peer.first_receive, .ack = fixture.peer.first_send + CONGESTION_WARMUP,
+            .window = window, .flags = ACK | FIN
+        }, 0U) && net_poll(0U) == 1);
+        CHECK(take_congestion_frame(&fixture, &gateway, CONGESTION_END, 0U));
+    }
+    CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, window, 0));
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    CHECK(cc->cwnd == CONGESTION_FLIGHT && connection->tx_outstanding == CONGESTION_FLIGHT);
+    CHECK(rto->timer_started_ms == 0U && connection->transmit_started_ms == 0U);
+
+    network_test_backend_clock_set(1000U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway, CONGESTION_WARMUP, window));
+    CHECK(cc->cwnd == CONGESTION_SMSS && cc->ssthresh == CONGESTION_FLIGHT / 2U);
+    CHECK(rto->retries == 1U && rto->wait_ms == 2000U);
+    for (unsigned int index = 0U; index < 3U; ++index) {
+        CHECK(congestion_ack(&fixture, CONGESTION_WARMUP, window, 0));
+    }
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    network_test_backend_clock_set(3000U);
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &gateway, CONGESTION_WARMUP, window));
+    CHECK(cc->ssthresh == CONGESTION_FLIGHT / 2U && rto->retries == 2U);
+    return dispose(&fixture.peer, 1);
+}
+
+enum fast_wait { FAST_RESUME, FAST_CANCEL, FAST_RTO };
+
+static int fast_retry_waits_for_neighbor(enum fast_wait mode)
+{
+    const struct tcp_connection *connection = &tcp_global_context.connection;
+    const struct tcp_rto *rto = &connection->stream.rto;
+    struct congestion_fixture fixture;
+    unsigned char output = 0xffU;
+
+    CHECK(prepare_congestion_flight(&fixture, 0U, 200U, 0));
+    network_test_backend_clock_set(200U);
+    CHECK(queue_fast_retry(&fixture));
+    CHECK(net_poll(0U) == 1 && take_arp_request());
+    CHECK(net_global_context.pending_arp.active && rto->timer_started_ms == 0U);
+
+    if (mode == FAST_CANCEL) {
+        CHECK(congestion_ack(&fixture, CONGESTION_END, CONGESTION_FLIGHT, 1));
+        CHECK(!net_global_context.pending_arp.active && !connection->stream.neighbor_pending);
+        CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+        CHECK(state(&fixture.peer, TCP_STATE_ESTABLISHED, 0, 0U, TCP_QUEUE_CAPACITY));
+        return dispose(&fixture.peer, 1);
+    }
+
+    network_test_backend_clock_set(mode == FAST_RTO ? 1000U : 225U);
+    CHECK(arp_reply(&refreshed) && net_poll(0U) == 1);
+    if (mode == FAST_RESUME) {
+        /* Resuming an owned lookup skips the clock read for starting ARP. */
+        network_test_backend_set_clock_read_step(1U);
+        CHECK(tcp_recv(fixture.peer.handle, &output, 1U, 7U) == NET_ERR_TIMEOUT && output == 0xffU);
+        network_test_backend_set_clock_read_step(0U);
+        CHECK(network_test_backend_transmit_count() == 0U && rto->timer_started_ms == 0U);
+        CHECK(connection->stream.congestion.cwnd == CONGESTION_FLIGHT);
+    }
+    CHECK(net_poll(0U) == 1 && take_congestion_frame(&fixture, &refreshed,
+                                                     CONGESTION_WARMUP, CONGESTION_SMSS));
+    CHECK(rto->retries == (mode == FAST_RTO ? 1U : 0U));
+    CHECK(rto->wait_ms == (mode == FAST_RTO ? 2000U : 1000U));
+    CHECK(net_poll(0U) == 0 && network_test_backend_transmit_count() == 0U);
+    return dispose(&fixture.peer, 1);
+}
+
 int test_tcp_stream(void)
 {
     if (!ring_boundary() || !transmit_boundaries() || !receive_boundaries() ||
@@ -1382,5 +1687,15 @@ int test_tcp_stream(void)
         return 0;
     }
     puts("E5a TCP retransmission, ARP resumption and transmit deadlines: PASS");
+    if (!fast_recovery_on_wire() || !idle_restart_on_wire() ||
+        !idle_restart_with_outstanding(CONGESTION_SMSS, 0) ||
+        !idle_restart_with_outstanding(CONGESTION_SMSS / 2U, 0) ||
+        !idle_restart_with_outstanding(CONGESTION_SMSS, 1) ||
+        !timeout_loss_threshold_after_partial_ack() || !window_reports_and_rto() ||
+        !fast_retry_waits_for_neighbor(FAST_RESUME) || !fast_retry_waits_for_neighbor(FAST_CANCEL) ||
+        !fast_retry_waits_for_neighbor(FAST_RTO)) {
+        return 0;
+    }
+    puts("E5b pipelined TCP data, guarded fast recovery and RTO fallback: PASS");
     return 1;
 }

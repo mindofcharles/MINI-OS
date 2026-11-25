@@ -8,7 +8,7 @@ Protocol parsing, packet construction, timers, and bounded state are modern C un
 
 The supported protocol subset is Ethernet II, Ethernet/IPv4 ARP, static-address unfragmented IPv4, ICMP Echo, and one actively opened IPv4 TCP connection with bounded bidirectional byte streams.
 
-TCP can recover from dropped data or acknowledgments within a bounded retry and transmit budget. Congestion control, sender zero-window probing and recovery from a lost window-reopening update, passive open, and wire-level shutdown are not implemented.
+TCP uses congestion control and can recover from dropped data or acknowledgments within a bounded retry and transmit budget. Sender zero-window probing and recovery from a lost window-reopening update, passive open, and wire-level shutdown are not implemented.
 
 UDP, DHCP, DNS, SSH, IPv4 options, fragment reassembly, and ICMP error processing are not implemented.
 
@@ -88,7 +88,7 @@ Only the next application run recreates this storage, and no TCP work can contin
 
 Positive stream waits check the deadline before starting an application copy or another raw receive or transmit. An already started driver operation may finish later. A received segment can still update the protocol queues, but the expired call cannot claim newly available bytes or space. Unsent acknowledgments remain pending, and a prefix copied before expiry is still reported.
 
-The sender limits data by the peer's current window and the smaller of the peer's usable MSS and 536 bytes, with at most one effective MSS outstanding for now. A future ACK cannot release unsent data. A window report with an older sequence number, or an older acknowledgment at the same sequence number, cannot replace the current window.
+A data segment carries at most the smaller of the peer's usable MSS and 536 bytes. The congestion window and the peer's current receive window jointly bound the amount of new data in flight. A future ACK cannot release unsent data. A window report with an older sequence number, or an older acknowledgment at the same sequence number, cannot replace the current window.
 
 An otherwise valid window update may reuse both sequence and acknowledgment values from the last report because the peer can free buffer space without advancing either value. Those two fields alone cannot order such reports. See [RFC 9293 section 3.8.6](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6).
 
@@ -106,7 +106,7 @@ The sender times the oldest unacknowledged range and retains its bytes in the tr
 
 A retry uses the original sequence numbers and only bytes inside the peer's current receive window. It reads the current range after ARP refresh, without retaining a prepared packet. A blocked or deferred send does not spend a retry, and a successful retry does not add to the flight size. Timeout retries double the RTO up to 60 seconds.
 
-After five retries without cumulative ACK progress, the next eligible expiry allows the normal single input opportunity before reporting `TCP_ERR_RETRIES`. An advancing ACK or a valid window closure can make that expiry inapplicable. A duplicate ACK that leaves the window open does not postpone failure or grant another receive opportunity.
+After five timeout retries without cumulative ACK progress, the next eligible expiry allows the normal single input opportunity before reporting `TCP_ERR_RETRIES`. An advancing ACK or a valid window closure can make that expiry inapplicable. A duplicate ACK that leaves the window open does not postpone failure or grant another receive opportunity.
 
 Fresh data with an unambiguous acknowledgment updates the RTT estimate. ACKs after a retransmission do not supply an ambiguous sample. The calculated RTO is bounded to 1–60 seconds. See [RFC 6298](https://www.rfc-editor.org/rfc/rfc6298.html#section-2).
 
@@ -115,6 +115,22 @@ The independent `transmit_timeout_ms` limit defaults to 300,000 ms. It runs whil
 Before starting a raw TCP transmit, the Ethernet layer checks both the no-progress deadline and any positive caller wait against the same clock reading. The no-progress deadline also applies to zero-wait calls, and an ACK processed at or after that deadline cannot revive the connection.
 
 No ordinary retries run against a closed peer receive window. Until sender probing is implemented, the connection needs a valid reopening update to resume in that case, and the independent no-progress limit still applies.
+
+## TCP sender congestion control
+
+The congestion window starts at one sender maximum segment size (SMSS) and grows only with qualifying ACK feedback. During slow start a cumulative ACK adds at most one SMSS of newly acknowledged bytes. In congestion avoidance the sender accumulates newly acknowledged bytes and adds one SMSS per congestion window acknowledged. The window is capped at the 4 KiB transmit ring capacity.
+
+New data must fit both the congestion window and the peer's receive window after accounting for outstanding bytes. If the peer shrinks its window below the flight size, no new data is sent until there is credit again. Outstanding bytes are retained, and old data can still be retransmitted within the peer's current window. A service step does not drain the entire transmit ring as a burst.
+
+After a successful timeout retry the congestion window goes back to one SMSS. If the oldest byte had not already been retransmitted by a timeout, the slow-start threshold is set to the greater of half of the actual flight and two SMSS. A partial ACK refreshes the timeout retry budget but only removes the acknowledged bytes from the already-retransmitted prefix. Retrying the remainder does not recompute the threshold. See [RFC 5681 section 3.1](https://www.rfc-editor.org/rfc/rfc5681.html#section-3.1).
+
+After no data has been sent for at least the current RTO, the sender applies the one-SMSS restart limit before calculating new-data credit. Bytes still in flight count against that limit. Incoming ACKs and unsuccessful send attempts do not reset the last-send clock. See [RFC 5681 section 4.1](https://www.rfc-editor.org/rfc/rfc5681.html#section-4.1).
+
+With bytes outstanding and a nonzero peer window, three pure ACKs at the next expected receive sequence can schedule a fast retry if they leave the cumulative ACK position and the accepted peer window unchanged. Stale or changed window reports do not count. The sender retransmits the oldest eligible bytes and limits any artificial window inflation to the estimated bytes behind them in the original flight. No Limited Transmit or SACK support is assumed.
+
+The recovery boundary is the exclusive end of the flight when the first fast retry is sent. A partial ACK schedules a retry of the new oldest eligible bytes without leaving recovery. An ACK covering the boundary ends recovery even if newer bytes remain outstanding. A timeout ends fast recovery and prevents a second entry based on duplicate reports for the same flight. See [RFC 6582](https://www.rfc-editor.org/rfc/rfc6582.html#section-3.2).
+
+A successful fast retry marks RTT samples ambiguous and restarts the fallback timer at its existing RTO, without backing off or spending one of the five timeout retries. A due timeout has priority over a queued fast retry. While ARP or the caller's deadline prevents output, no transmission is committed and the pending range is rechecked before sending. A fast retry does not reset the connection's independent transmit no-progress deadline.
 
 ## Internal ownership and resource bounds
 
@@ -152,9 +168,9 @@ This is not an implemented target idle/wakeup path, and the deterministic backen
 
 It checks the TCP lifecycle foundation and uses independent wire vectors for the codec, including the IPv4 receive and transmit-buffer paths.
 
-`make test-network-tcp` runs the TCP host suite normally and with AddressSanitizer and UndefinedBehaviorSanitizer, compiles the target TCP objects, and builds the strict-C90 guest probe. It covers the handshake, ring and sequence wrap, partial ACKs, large binary streams, closure and reopening of the receive window, retransmission timing, neighbor refresh, and terminal causes.
+`make test-network-tcp` runs the TCP host suite normally and with AddressSanitizer and UndefinedBehaviorSanitizer, compiles the target TCP objects, and builds the strict-C90 guest probe. It covers the handshake, ring and sequence wrap, partial ACKs, large binary streams, closure and reopening of the receive window, retransmission timing, congestion growth and recovery, neighbor refresh, and terminal causes.
 
-`make test-network-tcp-qemu` verifies handshake retransmission, lost final ACK recovery, refusal, and the no-entropy path through QEMU's NE2000 device. A controlled Ethernet peer and the guest also check exact streams of 7,351 and 7,129 bytes in opposite directions. A separate run drops the first data segment and requires the same sequence and bytes before acknowledging the retry. The test also checks gateway routing, an i386 HMAC known-answer vector, repeated application runs, guarded shell return, and image integrity.
+`make test-network-tcp-qemu` verifies handshake retransmission, lost final ACK recovery, refusal, and the no-entropy path through QEMU's NE2000 device. A controlled Ethernet peer and the guest also check exact streams of 7,351 and 7,129 bytes in opposite directions. Loss cases verify a timed retry and repair of two missing segments in a five-segment flight, including new data sent before recovery completes. The test also checks gateway routing, an i386 HMAC known-answer vector, repeated application runs, guarded shell return, and image integrity.
 
 `make test-network-d6` boots temporary debug images and tests exact ARP and ICMP wire packets through QEMU's NE2000 model against a controlled Ethernet peer, including cache reuse and expiry, malformed-packet rejection, inbound replies, bounded timeout, and keyboard cancellation.
 

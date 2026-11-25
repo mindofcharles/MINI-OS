@@ -13,7 +13,7 @@ static const struct net_config network = {
 static const struct tcp_endpoint endpoint = {{{10U, 0U, 2U, 2U}}, 22U};
 static const struct tcp_endpoint routed_endpoint = {{{192U, 0U, 2U, 9U}}, 22U};
 
-enum { STREAM_TX_COUNT = 7351, STREAM_RX_COUNT = 7129 };
+enum { STREAM_TX_COUNT = 7351, STREAM_RX_COUNT = 7129, RECOVERY_TX_COUNT = 16 * 128 };
 
 static int check_hmac_vector(void)
 {
@@ -183,14 +183,29 @@ static int check_stream(const struct tcp_config *config)
     return 0;
 }
 
+static int finish_transmit_probe(tcp_handle handle)
+{
+    struct tcp_status status;
+    unsigned int started = net_clock_now_ms();
+
+    while (!net_timeout_expired(started, net_clock_now_ms(), 10000U)) {
+        if (net_poll(100U) < 0 || tcp_status(handle, &status) != 0 ||
+            status.state != TCP_STATE_ESTABLISHED) {
+            return 0;
+        }
+        if (status.writable_bytes == TCP_QUEUE_CAPACITY && status.readable_bytes == 0U) {
+            return tcp_abort(handle) == 0 && tcp_release(handle) == 0 && check_disabled();
+        }
+    }
+    return 0;
+}
+
 static int check_retransmission(const struct tcp_config *config)
 {
     static const unsigned char data[] = {0x45U, 0U, 0x35U, 0x61U, 0xffU, 0x0dU,
                                          0U, 0x80U, 0x42U};
     tcp_handle handle = TCP_INVALID_HANDLE;
-    struct tcp_status status;
     unsigned char byte = 0xa5U;
-    unsigned int started;
     int result;
 
     result = tcp_connect(&handle, &routed_endpoint, config, 10000U);
@@ -203,18 +218,30 @@ static int check_retransmission(const struct tcp_config *config)
         printf("E5a TCP retransmit initial send or caller timeout failed\n");
         return 0;
     }
-    started = net_clock_now_ms();
-    while (!net_timeout_expired(started, net_clock_now_ms(), 10000U)) {
-        if (net_poll(100U) < 0 || tcp_status(handle, &status) != 0 ||
-            status.state != TCP_STATE_ESTABLISHED) {
-            break;
-        }
-        if (status.writable_bytes == TCP_QUEUE_CAPACITY && status.readable_bytes == 0U) {
-            return tcp_abort(handle) == 0 && tcp_release(handle) == 0 && check_disabled();
-        }
+    if (!finish_transmit_probe(handle)) {
+        printf("E5a TCP retransmit did not drain the transmit queue\n");
+        return 0;
     }
-    printf("E5a TCP retransmit did not drain the transmit queue\n");
-    return 0;
+    return 1;
+}
+
+static int check_fast_recovery(const struct tcp_config *config)
+{
+    unsigned char data[RECOVERY_TX_COUNT];
+    tcp_handle handle = TCP_INVALID_HANDLE;
+    unsigned int index;
+    int result;
+
+    result = tcp_connect(&handle, &routed_endpoint, config, 10000U);
+    if (result != 0) {
+        printf("E5b TCP recovery connect: %d\n", result);
+        return 0;
+    }
+    for (index = 0U; index < sizeof(data); ++index) {
+        data[index] = stream_byte(index, 45U);
+    }
+    return tcp_send(handle, data, sizeof(data), 0U) == (int)sizeof(data) &&
+           finish_transmit_probe(handle);
 }
 
 int main(int argc, char **argv)
@@ -237,6 +264,10 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "retransmit") == 0) {
         success = check_retransmission(&config);
         printf("E5a TCP retransmit: %s\n", success ? "PASS" : "FAIL");
+        return success ? 0 : 1;
+    } else if (strcmp(argv[1], "recovery") == 0) {
+        success = check_fast_recovery(&config);
+        printf("E5b TCP fast recovery: %s\n", success ? "PASS" : "FAIL");
         return success ? 0 : 1;
     } else if (strcmp(argv[1], "open") == 0 || strcmp(argv[1], "routed") == 0 ||
                strcmp(argv[1], "refuse") == 0) {

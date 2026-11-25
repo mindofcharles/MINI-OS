@@ -45,7 +45,9 @@ The shared service applies a positive stream wait deadline before each new raw r
 
 `tcp/rto.c` tracks the timed sequence range, estimates RTT from unambiguous acknowledgments, and backs off after successful timeout retries. The retry reads bytes from the existing ring and shares the normal output path and transmit frame. The no-progress limit for a nonempty queue remains independent of each caller wait and the RTO.
 
-The current stream path does not run congestion control, probe a closed peer receive window, or process wire-level FIN and EOF.
+`tcp/congestion.c` limits new data using a byte-counted congestion window, with slow start, congestion avoidance, timeout loss reduction, and idle restart. The sender can have multiple segments outstanding within the peer window and the two existing queue bounds.
+
+Three qualified duplicate ACKs can schedule a fast retransmission, and partial ACKs keep recovery active until the original flight is acknowledged. A fast retransmission does not spend the timeout retry budget. The current stream path does not probe a closed peer receive window or process wire-level FIN and EOF.
 
 Private lifecycle helpers retain terminal errors after partial-progress reporting, separate call waits from a once-captured close-grace deadline, reject unread-data loss, and prevent old handles from reaching a new generation.
 

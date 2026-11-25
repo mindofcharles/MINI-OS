@@ -106,7 +106,7 @@ This document only describes code/file responsibilities.
   - `platform.h`: C90-compatible monotonic-clock, nonblocking-key, and secure-random declarations
   - `compiler_rt.c`: modern-C unsigned 64-bit division and remainder helpers linked only where required
   - `net/`: modern-C network implementation directory, including raw-frame syscall wrappers, shared C/assembly ABI definitions, wrap-safe time helpers, production platform/cancellation adapters, byte-order and checksum primitives, static IPv4 configuration validation, transactional stack initialization, private Ethernet II framing/classification, ARP parsing/cache/resolution, restricted IPv4 and ICMP Echo processing, and polling dispatch
-  - `net/tcp/`: the TCP connection slot, segment codec, sequence helpers, ISN generation, active open, shared output, bounded stream queues, and retransmission timing.
+  - `net/tcp/`: the TCP connection slot, segment codec, sequence helpers, ISN generation, active open, shared output, bounded stream queues, retransmission timing, and sender congestion control.
   - `crypto/`: compiler-resistant clearing, the HMAC-SHA256 wrapper, and the freestanding Mbed TLS configuration.
   - `ssh/`: modern-C SSH implementation directory
   - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
@@ -146,4 +146,4 @@ This document only describes code/file responsibilities.
 - `tests/network_phase_d/`
   - strict-C90 public-header probe plus deterministic backend, byte-order, checksum, IPv4 configuration, device-contract, initialization, failure-atomicity, Ethernet framing, ARP cache/resolution, IPv4, ICMP Echo, and polling host regressions
 - `tests/network_phase_e.py` / `tests/network_phase_e/`
-  - A controlled QEMU TCP handshake and stream peer, deterministic lifecycle, codec, and queue tests, HMAC known-answer and allocation checks, and timeout and failure tests.
+  - A controlled QEMU TCP handshake, stream, and loss recovery peer, deterministic lifecycle, codec, queue, and congestion tests, HMAC known-answer and allocation checks, and timeout and failure tests.

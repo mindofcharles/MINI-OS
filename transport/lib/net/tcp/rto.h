@@ -28,6 +28,7 @@ void tcp_rto_init(struct tcp_rto *rto, int short_syn_timeout);
 void tcp_rto_new_data(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms,
                       int start_timer);
 void tcp_rto_retransmitted(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms);
+void tcp_rto_fast_retransmitted(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms);
 
 /* Called only for cumulative ACK progress, with the remaining flight size. */
 void tcp_rto_acknowledged(struct tcp_rto *rto, net_u32 ack, unsigned int flight,

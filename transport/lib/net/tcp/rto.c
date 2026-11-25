@@ -63,16 +63,27 @@ void tcp_rto_new_data(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms,
     }
 }
 
-void tcp_rto_retransmitted(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms)
+static void note_retransmission(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms)
 {
     /* An ACK covering this flight might have been prompted by the retry.
      * Wait for fresh data after it before timing another RTT. */
     rto->sample_state = TCP_RTT_AMBIGUOUS;
     rto->sample_right = right;
+    arm(rto, right, sent_ms);
+}
+
+void tcp_rto_retransmitted(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms)
+{
     ++rto->retries;
     rto->wait_ms = rto->wait_ms > TCP_RTO_MAX_MS / 2U ?
                    TCP_RTO_MAX_MS : rto->wait_ms * 2U;
-    arm(rto, right, sent_ms);
+    note_retransmission(rto, right, sent_ms);
+}
+
+void tcp_rto_fast_retransmitted(struct tcp_rto *rto, net_u32 right, net_u32 sent_ms)
+{
+    /* Keep a full RTO as a fallback, without backing off or spending a retry. */
+    note_retransmission(rto, right, sent_ms);
 }
 
 void tcp_rto_acknowledged(struct tcp_rto *rto, net_u32 ack, unsigned int flight,

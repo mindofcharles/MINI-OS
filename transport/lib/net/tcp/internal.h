@@ -3,6 +3,7 @@
 
 #include "../tcp.h"
 #include "../service.h"
+#include "congestion.h"
 #include "rto.h"
 
 enum {
@@ -26,6 +27,7 @@ struct tcp_active_open {
 
 struct tcp_stream {
     struct tcp_rto rto;
+    struct tcp_congestion congestion;
     net_u32 snd_una;
     net_u32 rcv_nxt;
     net_u32 rcv_right; /* Exclusive right edge last sent on the wire. */

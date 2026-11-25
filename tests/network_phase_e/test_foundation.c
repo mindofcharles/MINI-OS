@@ -726,6 +726,7 @@ int test_tcp_codec(void);
 int test_tcp_active_open(void);
 int test_tcp_stream(void);
 int test_tcp_rto(void);
+int test_tcp_congestion(void);
 
 int main(void)
 {
@@ -737,5 +738,5 @@ int main(void)
     puts("E1 TCP foundation, owned ARP, service and backend tests: PASS");
     puts("Private lifecycle fixtures are not TCP wire interoperability evidence.");
     return test_tcp_codec() && test_tcp_active_open() &&
-           test_tcp_stream() && test_tcp_rto() ? 0 : 1;
+           test_tcp_stream() && test_tcp_rto() && test_tcp_congestion() ? 0 : 1;
 }

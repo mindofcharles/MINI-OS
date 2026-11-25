@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise TCP active open, byte streams and retransmission with a QEMU peer."""
+"""Exercise TCP active open, byte streams and loss recovery with a QEMU peer."""
 
 from __future__ import annotations
 
@@ -33,6 +33,9 @@ STREAM_MSS = bytes.fromhex("02 04 01 37")
 QUEUE_CAPACITY = 4096
 STREAM_TX_COUNT, STREAM_RX_COUNT = 7351, 7129
 RETRY_BYTES = bytes.fromhex("45 00 35 61 ff 0d 00 80 42")
+RECOVERY_MSS = 128
+RECOVERY_WINDOW = 5 * RECOVERY_MSS
+RECOVERY_TX_COUNT = 16 * RECOVERY_MSS
 APP = "run /transport/build/lib_test/test_tcp_contract.bin"
 PROMPT = "/ > "
 TIMEOUT = 15.0
@@ -141,11 +144,50 @@ def recover_dropped_data(peer: socket.socket, local_port: int, first_sequence: i
                                ACK, QUEUE_CAPACITY, routed=True))
 
 
+def recover_two_losses(peer: socket.socket, local_port: int, first_sequence: int) -> None:
+    def data(offset: int, label: str) -> None:
+        flags = ACK | PSH if offset + RECOVERY_MSS == RECOVERY_TX_COUNT else ACK
+        expect_frame(peer, tcp_frame(
+            local_port, PEER_PORT, (first_sequence + offset) & 0xFFFFFFFF, 0,
+            flags, QUEUE_CAPACITY, payload=stream_bytes(offset, RECOVERY_MSS, 45),
+            routed=True, from_guest=True,
+        ), label)
+
+    def acknowledge(offset: int) -> None:
+        send_frame(peer, tcp_frame(
+            PEER_PORT, local_port, 0, (first_sequence + offset) & 0xFFFFFFFF,
+            ACK, RECOVERY_WINDOW, routed=True,
+        ))
+
+    offset = 0
+    for flight in range(1, 5):
+        for _ in range(flight):
+            data(offset, f"slow-start flight of {flight} before an ACK")
+            offset += RECOVERY_MSS
+        acknowledge(offset)
+
+    first_loss = offset
+    for segment in range(5):
+        data(offset, f"five-segment loss flight, segment {segment + 1}")
+        offset += RECOVERY_MSS
+    # Drop A and C; buffering B, D and E produces three duplicate ACKs for A.
+    for _ in range(3):
+        acknowledge(first_loss)
+    data(first_loss, "fast retransmission of A")
+    second_loss = first_loss + 2 * RECOVERY_MSS
+    acknowledge(second_loss)
+    data(second_loss, "repair of C after a partial ACK")
+    # An RTO would reduce cwnd below the three segments still outstanding here.
+    # Receiving new F before another cumulative ACK proves windowed recovery.
+    data(offset, "new data during fast recovery")
+    acknowledge(offset + RECOVERY_MSS)
+
+
 def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
               *, retry_syn: bool = False) -> None:
     start = vm.send_command(f"{APP} {mode}")
     if mode != "entropy":
-        routed = mode in ("routed", "stream", "retransmit")
+        routed = mode in ("routed", "stream", "retransmit", "recovery")
         expect_frame(peer, arp_frame(1, b"\xff" * 6, GUEST_MAC, GUEST_IP,
                                      b"\x00" * 6, PEER_IP), "guest ARP request")
         send_frame(peer, arp_frame(2, GUEST_MAC, PEER_MAC, PEER_IP,
@@ -165,9 +207,13 @@ def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
                                        RST | ACK))
         else:
             stream = mode == "stream"
+            window = 400 if stream else QUEUE_CAPACITY
+            options = STREAM_MSS if stream else PEER_MSS
+            if mode == "recovery":
+                window = RECOVERY_WINDOW
+                options = struct.pack("!BBH", 2, 4, RECOVERY_MSS)
             syn_ack = tcp_frame(PEER_PORT, local_port, PEER_SEQUENCE, next_sequence,
-                                SYN | ACK, 400 if stream else 4096,
-                                STREAM_MSS if stream else PEER_MSS, routed=routed)
+                                SYN | ACK, window, options, routed=routed)
             expected_ack = tcp_frame(local_port, PEER_PORT, next_sequence, 0, ACK,
                                      QUEUE_CAPACITY, routed=routed, from_guest=True)
             send_frame(peer, syn_ack)
@@ -176,6 +222,8 @@ def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
                 exchange_stream(peer, local_port, next_sequence)
             elif mode == "retransmit":
                 recover_dropped_data(peer, local_port, next_sequence)
+            elif mode == "recovery":
+                recover_two_losses(peer, local_port, next_sequence)
             else:
                 send_frame(peer, syn_ack)
                 expect_frame(peer, expected_ack, "repeated final ACK")
@@ -183,6 +231,7 @@ def run_probe(vm: VirtualMachine, peer: socket.socket, mode: str,
     marker = {
         "stream": "E4 TCP stream: PASS",
         "retransmit": "E5a TCP retransmit: PASS",
+        "recovery": "E5b TCP fast recovery: PASS",
     }.get(mode, f"E3 TCP {mode}: PASS")
     require(marker in segment,
             f"TCP guest omitted {mode} PASS:\n{segment}")
@@ -222,6 +271,7 @@ def main() -> int:
                             run_probe(vm, peer, "refuse")
                             run_probe(vm, peer, "stream")
                             run_probe(vm, peer, "retransmit")
+                            run_probe(vm, peer, "recovery")
                     vm.command_expect("pwd", PROMPT)
                 finally:
                     vm.stop()
@@ -236,7 +286,7 @@ def main() -> int:
                         shutil.copy2(path, destination / path.name)
                     print(f"TCP failure artifacts retained in {destination}", file=sys.stderr)
                 raise
-    print("TCP QEMU active open, routed streams, retransmission and guards: PASS")
+    print("TCP QEMU active open, routed streams, loss recovery and guards: PASS")
     return 0
 
 
